@@ -1,0 +1,8 @@
+{
+  "srtVersion": "1.5.7",
+  "opensslBuildVersion": "3.3.3",
+  "opensslPackage": "https://github.com/krzyzanowskim/OpenSSL-Package.git",
+  "opensslPackageRange": "3.3.3001..<4.0.0",
+  "opensslBundled": false,
+  "requiredArtifact": "OpenSSL.xcframework"
+}

@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["TallyThermalModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.tallythermal.TallyThermalModule"]
+  }
+}

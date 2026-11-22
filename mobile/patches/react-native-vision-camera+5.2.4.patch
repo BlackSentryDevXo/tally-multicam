@@ -1,0 +1,674 @@
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt
+index 337601a..aa80142 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt
+@@ -42,6 +42,9 @@ class HybridCameraController(
+     get() = camera.cameraInfo.cameraState.value
+   private var zoomAnimator: ValueAnimator? = null
+ 
++  // [Tally patch] Manual focus/exposure/WB through Camera2 interop.
++  private val manual = ManualCamera2Controls(camera).also { it.start() }
++
+   override val isConnected: Boolean
+     get() = cameraState?.type == CameraState.Type.OPEN
+ 
+@@ -89,13 +92,13 @@ class HybridCameraController(
+   override val isSmoothAutoFocusEnabled: Boolean
+     get() = false
+ 
+-  // TODO: CameraX only supports continuous AE/AF/AWB
++  // [Tally patch] reflect manual locks applied via Camera2 interop
+   override val focusMode: FocusMode
+-    get() = FocusMode.CONTINUOUS_AUTO_FOCUS
++    get() = if (manual.isFocusLocked) FocusMode.LOCKED else FocusMode.CONTINUOUS_AUTO_FOCUS
+   override val exposureMode: ExposureMode
+-    get() = ExposureMode.CONTINUOUS_AUTO_EXPOSURE
++    get() = if (manual.isExposureLocked) ExposureMode.LOCKED else ExposureMode.CONTINUOUS_AUTO_EXPOSURE
+   override val whiteBalanceMode: WhiteBalanceMode
+-    get() = WhiteBalanceMode.CONTINUOUS_AUTO_WHITE_BALANCE
++    get() = if (manual.isWhiteBalanceLocked) WhiteBalanceMode.LOCKED else WhiteBalanceMode.CONTINUOUS_AUTO_WHITE_BALANCE
+ 
+   override fun configure(config: CameraControllerConfiguration): Promise<Unit> {
+     return Promise.async {
+@@ -187,6 +190,8 @@ class HybridCameraController(
+       camera.cameraControl
+         .cancelFocusAndMetering()
+         .await()
++      // [Tally patch] also release manual focus/exposure/WB back to continuous 3A
++      manual.resetAll().await()
+     }
+   }
+ 
+@@ -282,77 +287,72 @@ class HybridCameraController(
+     return Promise.resolved()
+   }
+ 
+-  // TODO: Once CameraX implements locking Focus to a custom lens position, implement this:
++  // [Tally patch] Manual controls implemented with Camera2 interop (see ManualCamera2Controls).
+   override val lensPosition: Double
+-    get() = 0.0
++    get() = manual.lensPosition
+ 
+   override fun setFocusLocked(lensPosition: Double): Promise<Unit> {
+-    throw Error(
+-      "Setting Focus Lens Position is not yet supported on Android! " +
+-        "You can use AF metering locks (`focusTo(point, { modes: ['AF'], adaptiveness: 'locked' })`) instead.",
+-    )
++    return Promise.async { manual.setFocusLocked(lensPosition).await() }
+   }
+ 
+   override fun lockCurrentFocus(): Promise<Unit> {
+-    throw Error(
+-      "Setting Focus Lens Position is not yet supported on Android! " +
+-        "You can use AF metering locks (`focusTo(point, { modes: ['AF'], adaptiveness: 'locked' })`) instead.",
+-    )
++    return Promise.async { manual.lockCurrentFocus().await() }
+   }
+ 
+-  // TODO: Once CameraX implements locking Exposure to custom duration/ISO, implement this:
+   override val minExposureDuration: Double
+-    get() = 0.0
++    get() = manual.minExposureDurationSec
+   override val maxExposureDuration: Double
+-    get() = 0.0
++    get() = manual.maxExposureDurationSec
+   override val minISO: Double
+-    get() = 0.0
++    get() = if (manual.supportsExposureLocking) manual.isoRange?.lower?.toDouble() ?: 0.0 else 0.0
+   override val maxISO: Double
+-    get() = 0.0
++    get() = if (manual.supportsExposureLocking) manual.isoRange?.upper?.toDouble() ?: 0.0 else 0.0
+   override val iso: Double
+-    get() = 0.0
++    get() = manual.iso
+   override val exposureDuration: Double
+-    get() = 0.0
++    get() = manual.exposureDurationSec
+ 
+   override fun setExposureLocked(
+     duration: Double,
+     iso: Double,
+   ): Promise<Unit> {
+-    throw Error(
+-      "Locking Exposure to manual duration/ISO values is not yet supported on Android! " +
+-        "You can use Exposure Bias (`setExposureBias(...)`) or AE metering locks (`focusTo(point, { modes: ['AE'], adaptiveness: 'locked' })`) instead.",
+-    )
++    return Promise.async { manual.setExposureLocked(duration, iso).await() }
+   }
+ 
+   override fun lockCurrentExposure(): Promise<Unit> {
+-    throw Error(
+-      "Locking Exposure to manual duration/ISO values is not yet supported on Android! " +
+-        "You can use Exposure Bias (`setExposureBias(...)`) or AE metering locks (`focusTo(point, { modes: ['AE'], adaptiveness: 'locked' })`) instead.",
+-    )
++    return Promise.async { manual.lockCurrentExposure().await() }
+   }
+ 
+-  // TODO: Once CameraX implements locking AWB to custom White Balance Gains, implement this:
+   override val whiteBalanceGains: WhiteBalanceGains
+-    get() = WhiteBalanceGains(0.0, 0.0, 0.0)
++    get() {
++      val g = manual.resultGains ?: return WhiteBalanceGains(0.0, 0.0, 0.0)
++      return WhiteBalanceGains(
++        redGain = g.red.toDouble(),
++        blueGain = g.blue.toDouble(),
++        greenGain = ((g.greenEven + g.greenOdd) / 2f).toDouble(),
++      )
++    }
+ 
+   override fun convertWhiteBalanceTemperatureAndTintValues(whiteBalanceTemperatureAndTint: WhiteBalanceTemperatureAndTint): WhiteBalanceGains {
+-    throw Error(
+-      "Locking White Balance Gains is not yet supported on Android! " +
+-        "You can use AWB metering locks (`focusTo(point, { modes: ['AWB'], adaptiveness: 'locked' })`) instead.",
+-    )
++    if (!manual.supportsWhiteBalanceLocking) {
++      throw Error("This camera does not support manual white balance (needs Camera2 MANUAL_POST_PROCESSING).")
++    }
++    val (r, g, b) =
++      manual
++        .gainsFor(whiteBalanceTemperatureAndTint.temperature, whiteBalanceTemperatureAndTint.tint)
++        .toList()
++    return WhiteBalanceGains(redGain = r, blueGain = b, greenGain = g)
+   }
+ 
+   override fun setWhiteBalanceLocked(whiteBalanceGains: WhiteBalanceGains): Promise<Unit> {
+-    throw Error(
+-      "Locking White Balance Gains is not yet supported on Android! " +
+-        "You can use AWB metering locks (`focusTo(point, { modes: ['AWB'], adaptiveness: 'locked' })`) instead.",
+-    )
++    return Promise.async {
++      manual
++        .setWhiteBalanceLocked(whiteBalanceGains.redGain, whiteBalanceGains.greenGain, whiteBalanceGains.blueGain)
++        .await()
++    }
+   }
+ 
+   override fun lockCurrentWhiteBalance(): Promise<Unit> {
+-    throw Error(
+-      "Locking White Balance Gains is not yet supported on Android! " +
+-        "You can use AWB metering locks (`focusTo(point, { modes: ['AWB'], adaptiveness: 'locked' })`) instead.",
+-    )
++    return Promise.async { manual.lockCurrentWhiteBalance().await() }
+   }
+ }
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/ManualCamera2Controls.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/ManualCamera2Controls.kt
+new file mode 100644
+index 0000000..b4dc25c
+--- /dev/null
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/ManualCamera2Controls.kt
+@@ -0,0 +1,482 @@
++package com.margelo.nitro.camera.hybrids
++
++import android.annotation.SuppressLint
++import android.hardware.camera2.CameraCaptureSession
++import android.hardware.camera2.CameraCharacteristics
++import android.hardware.camera2.CameraMetadata
++import android.hardware.camera2.CaptureRequest
++import android.hardware.camera2.CaptureResult
++import android.hardware.camera2.TotalCaptureResult
++import android.hardware.camera2.params.ColorSpaceTransform
++import android.hardware.camera2.params.RggbChannelVector
++import android.util.Log
++import android.util.Range
++import androidx.camera.camera2.interop.applyCamera2InteropAsync
++import androidx.camera.core.Camera
++import com.google.common.util.concurrent.ListenableFuture
++import com.margelo.nitro.camera.extensions.cameraCharacteristicsOrNull
++import java.util.concurrent.Executor
++import kotlin.math.max
++import kotlin.math.min
++import kotlin.math.sqrt
++
++/**
++ * [Tally patch] Manual focus / exposure / white-balance for Android via CameraX Camera2 interop.
++ *
++ * CameraX only exposes continuous 3A, so this class keeps the requested manual state and
++ * re-applies the full set of Camera2 capture-request options every time something changes
++ * (clear-all + set), which is deterministic regardless of how CameraX merges interop configs.
++ * A repeating capture callback reads the live ISO / shutter / focus distance / AWB gains so
++ * `lockCurrent*()` can freeze the values the camera is using right now.
++ */
++@SuppressLint("RestrictedApi", "UnsafeOptInUsageError")
++internal class ManualCamera2Controls(
++  private val camera: Camera,
++) {
++  private val characteristics: CameraCharacteristics? = camera.cameraInfo.cameraCharacteristicsOrNull
++  private val capabilities: IntArray =
++    characteristics?.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
++
++  val supportsManualSensor = CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in capabilities
++  val supportsManualPostProcessing =
++    CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING in capabilities
++
++  /** Diopters (1/m). 0 means fixed-focus. */
++  val minFocusDistance: Float = characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
++  val supportsFocusLocking = supportsManualSensor && minFocusDistance > 0f
++  val supportsExposureLocking = supportsManualSensor
++  val supportsWhiteBalanceLocking = supportsManualPostProcessing
++  private val aeLockAvailable = characteristics?.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) ?: false
++  private val awbLockAvailable = characteristics?.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) ?: false
++
++  val isoRange: Range<Int>? = characteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
++  val exposureRangeNs: Range<Long>? = characteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
++
++  // ---- requested state ----
++  private var focusDistance: Float? = null // manual lens distance in diopters
++  private var focusHold = false // AF_MODE_AUTO without trigger (fallback lock)
++  private var manualExposure: Pair<Long, Int>? = null // (exposure ns, ISO)
++  private var aeLock = false
++  private var manualGains: RggbChannelVector? = null
++  private var manualTransform: ColorSpaceTransform? = null
++  private var awbLock = false
++
++  // ---- live values from the capture results ----
++  @Volatile var resultIso: Int? = null
++    private set
++
++  @Volatile var resultExposureNs: Long? = null
++    private set
++
++  @Volatile var resultFocusDistance: Float? = null
++    private set
++
++  @Volatile var resultGains: RggbChannelVector? = null
++    private set
++
++  @Volatile private var autoTransform: ColorSpaceTransform? = null
++
++  /** Frame duration chosen by auto-exposure (keeps the target fps when we take over AE). */
++  @Volatile private var autoFrameDurationNs: Long? = null
++
++  private val directExecutor = Executor { it.run() }
++  private val captureCallback =
++    object : CameraCaptureSession.CaptureCallback() {
++      override fun onCaptureCompleted(
++        session: CameraCaptureSession,
++        request: CaptureRequest,
++        result: TotalCaptureResult,
++      ) {
++        result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { resultIso = it }
++        result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { resultExposureNs = it }
++        result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { resultFocusDistance = it }
++        result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { resultGains = it }
++        if (manualGains == null) result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM)?.let { autoTransform = it }
++        if (manualExposure == null) result.get(CaptureResult.SENSOR_FRAME_DURATION)?.let { autoFrameDurationNs = it }
++      }
++    }
++
++  val isFocusLocked get() = focusDistance != null || focusHold
++  val isExposureLocked get() = manualExposure != null || aeLock
++  val isWhiteBalanceLocked get() = manualGains != null || awbLock
++
++  /** 0.0 (closest) ... 1.0 (infinity), iOS semantics. */
++  val lensPosition: Double
++    get() {
++      if (!supportsFocusLocking) return 0.0
++      val d = focusDistance ?: resultFocusDistance ?: return 0.0
++      return (1.0 - d / minFocusDistance).coerceIn(0.0, 1.0)
++    }
++
++  val minExposureDurationSec: Double
++    get() = if (supportsExposureLocking) (exposureRangeNs?.lower ?: 0L) / 1e9 else 0.0
++
++  /** Capped at the current frame interval so manual shutter never drops the frame rate. */
++  val maxExposureDurationSec: Double
++    get() {
++      if (!supportsExposureLocking) return 0.0
++      val sensorMax = exposureRangeNs?.upper ?: return 0.0
++      val frame = autoFrameDurationNs
++      return (if (frame != null && frame > 0) min(sensorMax, frame) else sensorMax) / 1e9
++    }
++
++  val exposureDurationSec: Double
++    get() = (manualExposure?.first ?: resultExposureNs ?: 0L) / 1e9
++
++  val iso: Double
++    get() = (manualExposure?.second ?: resultIso ?: 0).toDouble()
++
++  // ---------------- setters ----------------
++
++  fun setFocusLocked(lensPosition: Double): ListenableFuture<Void> {
++    if (!supportsFocusLocking) {
++      throw Error("This camera does not support manual focus (needs Camera2 MANUAL_SENSOR and a focusable lens).")
++    }
++    if (lensPosition < 0.0 || lensPosition > 1.0) {
++      throw Error("`lensPosition` must be within 0.0 ... 1.0, received $lensPosition.")
++    }
++    focusDistance = ((1.0 - lensPosition) * minFocusDistance).toFloat()
++    focusHold = false
++    return apply()
++  }
++
++  fun lockCurrentFocus(): ListenableFuture<Void> {
++    val current = resultFocusDistance
++    if (supportsFocusLocking && current != null) {
++      focusDistance = current
++    } else if (minFocusDistance > 0f) {
++      focusHold = true // AF_MODE_AUTO holds the lens where it is until re-triggered
++    } else {
++      throw Error("This camera has a fixed-focus lens, focus cannot be locked.")
++    }
++    return apply()
++  }
++
++  fun setExposureLocked(
++    durationSec: Double,
++    iso: Double,
++  ): ListenableFuture<Void> {
++    if (!supportsExposureLocking) {
++      throw Error("This camera does not support manual exposure (needs Camera2 MANUAL_SENSOR).")
++    }
++    val minD = minExposureDurationSec
++    val maxD = maxExposureDurationSec
++    if (durationSec < minD || durationSec > maxD) {
++      throw Error("`duration` must be within $minD ... $maxD seconds, received $durationSec.")
++    }
++    val range = isoRange ?: throw Error("This camera does not report an ISO range.")
++    if (iso < range.lower || iso > range.upper) {
++      throw Error("`iso` must be within ${range.lower} ... ${range.upper}, received $iso.")
++    }
++    manualExposure = Pair((durationSec * 1e9).toLong(), iso.toInt())
++    aeLock = false
++    return apply()
++  }
++
++  fun lockCurrentExposure(): ListenableFuture<Void> {
++    val ns = resultExposureNs
++    val currentIso = resultIso
++    if (supportsExposureLocking && ns != null && currentIso != null) {
++      manualExposure = Pair(ns, currentIso)
++    } else if (aeLockAvailable) {
++      aeLock = true
++    } else {
++      throw Error("This camera does not support locking exposure.")
++    }
++    return apply()
++  }
++
++  fun setWhiteBalanceLocked(
++    red: Double,
++    green: Double,
++    blue: Double,
++  ): ListenableFuture<Void> {
++    if (!supportsWhiteBalanceLocking) {
++      throw Error("This camera does not support manual white balance (needs Camera2 MANUAL_POST_PROCESSING).")
++    }
++    for ((name, g) in listOf("redGain" to red, "greenGain" to green, "blueGain" to blue)) {
++      if (g < 1.0 || g > MAX_WB_GAIN) throw Error("`$name` must be within 1.0 ... $MAX_WB_GAIN, received $g.")
++    }
++    manualGains = RggbChannelVector(red.toFloat(), green.toFloat(), green.toFloat(), blue.toFloat())
++    manualTransform = autoTransform
++    awbLock = false
++    return apply()
++  }
++
++  fun lockCurrentWhiteBalance(): ListenableFuture<Void> {
++    val gains = resultGains
++    if (supportsWhiteBalanceLocking && gains != null) {
++      manualGains = gains
++      manualTransform = autoTransform
++    } else if (awbLockAvailable) {
++      awbLock = true
++    } else {
++      throw Error("This camera does not support locking white balance.")
++    }
++    return apply()
++  }
++
++  fun resetAll(): ListenableFuture<Void> {
++    focusDistance = null
++    focusHold = false
++    manualExposure = null
++    aeLock = false
++    manualGains = null
++    manualTransform = null
++    awbLock = false
++    return apply()
++  }
++
++  /** Installs the capture callback so live values are available before any lock. */
++  fun start() {
++    try {
++      apply()
++    } catch (e: Throwable) {
++      Log.w(TAG, "Failed to install Camera2 interop capture callback", e)
++    }
++  }
++
++  /** Re-applies the complete set of Camera2 options for the current manual state. */
++  private fun apply(): ListenableFuture<Void> =
++    camera.cameraControl.applyCamera2InteropAsync {
++      clearAllCaptureRequestOptions()
++      setRepeatingCaptureCallback(directExecutor, captureCallback)
++
++      // Focus
++      val distance = focusDistance
++      if (distance != null) {
++        setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
++        setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, distance)
++      } else if (focusHold) {
++        setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_AUTO)
++      }
++
++      // Exposure
++      val exposure = manualExposure
++      if (exposure != null) {
++        val (ns, sensitivity) = exposure
++        val frame = max(ns, autoFrameDurationNs ?: ns)
++        setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
++        setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, ns)
++        setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, sensitivity)
++        setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, frame)
++      } else if (aeLock) {
++        setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
++      }
++
++      // White balance
++      val gains = manualGains
++      if (gains != null) {
++        setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
++        setCaptureRequestOption(
++          CaptureRequest.COLOR_CORRECTION_MODE,
++          CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX,
++        )
++        setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_GAINS, gains)
++        setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_TRANSFORM, manualTransform ?: IDENTITY)
++      } else if (awbLock) {
++        setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
++      }
++    }
++
++  /** Kelvin + tint to RGB gains (green = 1). See [WhiteBalanceMath]. */
++  fun gainsFor(
++    temperature: Double,
++    tint: Double,
++  ): DoubleArray = WhiteBalanceMath.gainsFor(characteristics, temperature, tint, MAX_WB_GAIN)
++
++  companion object {
++    private const val TAG = "VisionCamera/Manual"
++    const val MAX_WB_GAIN = 8.0
++    private val IDENTITY =
++      ColorSpaceTransform(intArrayOf(1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1))
++  }
++}
++
++/**
++ * [Tally patch] Color temperature + tint to Camera2 white-balance gains.
++ *
++ * Preferred path (DNG math, the same approach Adobe's DNG SDK uses):
++ *  1. Planckian locus xy for the temperature (Kim et al. cubic approximation, 1667-25000 K).
++ *  2. Tint shifts the point perpendicular to the locus in CIE 1960 uv, 1 tint unit = 1/3000 uv
++ *     (Adobe convention; positive = magenta correction).
++ *  3. Camera-neutral = (CALIBRATION_TRANSFORM * COLOR_TRANSFORM) * XYZ, with the matrix
++ *     interpolated between the sensor's two reference illuminants by inverse temperature.
++ *  4. Gains = neutral.green / neutral.channel (green = 1), normalised so no gain is below 1.
++ *
++ * Fallback when the HAL has no color calibration (non-RAW devices): linear sRGB of the
++ * illuminant scaled by typical CMOS daylight gains (R 2.0, B 1.6 at D65). This is only an
++ * approximation; colours will be close but not reference-accurate on such devices.
++ */
++internal object WhiteBalanceMath {
++  fun gainsFor(
++    c: CameraCharacteristics?,
++    temperature: Double,
++    tint: Double,
++    maxGain: Double,
++  ): DoubleArray {
++    val t = temperature.coerceIn(1700.0, 25000.0)
++    val xyz = xyzFor(t, tint)
++    val neutral = cameraNeutral(c, t, xyz) ?: fallbackNeutral(xyz)
++    var r = neutral[1] / neutral[0]
++    var g = 1.0
++    var b = neutral[1] / neutral[2]
++    val lowest = min(r, min(g, b))
++    if (lowest < 1.0) {
++      r /= lowest
++      g /= lowest
++      b /= lowest
++    }
++    return doubleArrayOf(r.coerceIn(1.0, maxGain), g.coerceIn(1.0, maxGain), b.coerceIn(1.0, maxGain))
++  }
++
++  /** Planckian xy (Kim et al. 2002). */
++  fun planckXy(t: Double): DoubleArray {
++    val t2 = t * t
++    val t3 = t2 * t
++    val x =
++      if (t <= 4000) {
++        -0.2661239e9 / t3 - 0.2343589e6 / t2 + 0.8776956e3 / t + 0.179910
++      } else {
++        -3.0258469e9 / t3 + 2.1070379e6 / t2 + 0.2226347e3 / t + 0.240390
++      }
++    val x2 = x * x
++    val x3 = x2 * x
++    val y =
++      when {
++        t <= 2222 -> -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * x - 0.20219683
++        t <= 4000 -> -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * x - 0.16748867
++        else -> 3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483
++      }
++    return doubleArrayOf(x, y)
++  }
++
++  private fun xyToUv(xy: DoubleArray): DoubleArray {
++    val d = -2 * xy[0] + 12 * xy[1] + 3
++    return doubleArrayOf(4 * xy[0] / d, 6 * xy[1] / d)
++  }
++
++  private fun uvToXy(uv: DoubleArray): DoubleArray {
++    val d = 2 * uv[0] - 8 * uv[1] + 4
++    return doubleArrayOf(3 * uv[0] / d, 2 * uv[1] / d)
++  }
++
++  /** White point XYZ (Y = 1) for a temperature and tint. */
++  fun xyzFor(
++    t: Double,
++    tint: Double,
++  ): DoubleArray {
++    val uv = xyToUv(planckXy(t))
++    if (tint != 0.0) {
++      val uv2 = xyToUv(planckXy(min(t + 10, 25000.0)))
++      val du = uv2[0] - uv[0]
++      val dv = uv2[1] - uv[1]
++      val len = sqrt(du * du + dv * dv)
++      if (len > 0) {
++        // Unit normal pointing toward higher v (green side of the locus).
++        var nu = -dv / len
++        var nv = du / len
++        if (nv < 0) {
++          nu = -nu
++          nv = -nv
++        }
++        // Positive tint (magenta correction) assumes a greener illuminant.
++        uv[0] += nu * tint / 3000.0
++        uv[1] += nv * tint / 3000.0
++      }
++    }
++    val xy = uvToXy(uv)
++    return doubleArrayOf(xy[0] / xy[1], 1.0, (1 - xy[0] - xy[1]) / xy[1])
++  }
++
++  private fun illuminantCct(code: Int?): Double? =
++    when (code) {
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_DAYLIGHT -> 5500.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_FLUORESCENT -> 4150.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_TUNGSTEN -> 2850.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_FLASH -> 5500.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_FINE_WEATHER -> 5500.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_CLOUDY_WEATHER -> 6500.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_SHADE -> 7500.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_DAYLIGHT_FLUORESCENT -> 6430.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_DAY_WHITE_FLUORESCENT -> 5000.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_COOL_WHITE_FLUORESCENT -> 4150.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_WHITE_FLUORESCENT -> 3525.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_STANDARD_A -> 2856.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_STANDARD_B -> 4874.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_STANDARD_C -> 6774.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_D55 -> 5503.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_D65 -> 6504.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_D75 -> 7504.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_D50 -> 5003.0
++      CameraMetadata.SENSOR_REFERENCE_ILLUMINANT1_ISO_STUDIO_TUNGSTEN -> 3200.0
++      else -> null
++    }
++
++  /** Row-major 3x3 from a Camera2 transform. */
++  private fun matrix(m: ColorSpaceTransform): Array<DoubleArray> =
++    Array(3) { row -> DoubleArray(3) { col -> m.getElement(col, row).toDouble() } }
++
++  private fun mul(
++    a: Array<DoubleArray>,
++    b: Array<DoubleArray>,
++  ): Array<DoubleArray> = Array(3) { r -> DoubleArray(3) { c -> (0 until 3).sumOf { k -> a[r][k] * b[k][c] } } }
++
++  private fun mulVec(
++    m: Array<DoubleArray>,
++    v: DoubleArray,
++  ): DoubleArray = DoubleArray(3) { r -> m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2] }
++
++  private fun cameraNeutral(
++    c: CameraCharacteristics?,
++    t: Double,
++    xyz: DoubleArray,
++  ): DoubleArray? {
++    if (c == null) return null
++    val cm1 = c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM1) ?: return null
++    val cct1 = illuminantCct(c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1)) ?: return null
++    val cal1 = c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1)
++    val m1 = if (cal1 != null) mul(matrix(cal1), matrix(cm1)) else matrix(cm1)
++
++    val cm2 = c.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)
++    val cct2 = illuminantCct(c.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2)?.toInt())
++    val m =
++      if (cm2 != null && cct2 != null && cct2 != cct1) {
++        val cal2 = c.get(CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2)
++        val m2 = if (cal2 != null) mul(matrix(cal2), matrix(cm2)) else matrix(cm2)
++        // Interpolate by inverse temperature between the two calibration illuminants.
++        val (lo, hi, mLo, mHi) =
++          if (cct1 < cct2) Quad(cct1, cct2, m1, m2) else Quad(cct2, cct1, m2, m1)
++        val w = ((1 / t - 1 / hi) / (1 / lo - 1 / hi)).coerceIn(0.0, 1.0)
++        Array(3) { r -> DoubleArray(3) { col -> w * mLo[r][col] + (1 - w) * mHi[r][col] } }
++      } else {
++        m1
++      }
++    val n = mulVec(m, xyz)
++    return if (n.all { it > 1e-6 }) n else null
++  }
++
++  private data class Quad(
++    val lo: Double,
++    val hi: Double,
++    val mLo: Array<DoubleArray>,
++    val mHi: Array<DoubleArray>,
++  )
++
++  private fun fallbackNeutral(xyz: DoubleArray): DoubleArray {
++    // XYZ -> linear sRGB (D65)
++    val r = 3.2406 * xyz[0] - 1.5372 * xyz[1] - 0.4986 * xyz[2]
++    val g = -0.9689 * xyz[0] + 1.8758 * xyz[1] + 0.0415 * xyz[2]
++    val b = 0.0557 * xyz[0] - 0.2040 * xyz[1] + 1.0570 * xyz[2]
++    val d65 = xyzFor(6504.0, 0.0)
++    val r65 = 3.2406 * d65[0] - 1.5372 * d65[1] - 0.4986 * d65[2]
++    val g65 = -0.9689 * d65[0] + 1.8758 * d65[1] + 0.0415 * d65[2]
++    val b65 = 0.0557 * d65[0] - 0.2040 * d65[1] + 1.0570 * d65[2]
++    // Typical CMOS sensor needs ~2.0x red and ~1.6x blue at D65: neutral = sRGB response / those gains.
++    return doubleArrayOf(
++      max(r / r65, 1e-3) / 2.0,
++      max(g / g65, 1e-3),
++      max(b / b65, 1e-3) / 1.6,
++    )
++  }
++}
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt
+index a00188f..ea6e952 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt
+@@ -125,16 +125,23 @@ class HybridCameraDevice(
+   override val supportsWhiteBalanceMetering: Boolean
+     get() = cameraInfo.isFocusMeteringSupported(createDummyMeteringAction(FocusMeteringAction.FLAG_AWB))
+ 
+-  // TODO: CameraX doesn't support manual Focus/Exposure/WB locking...
++  // [Tally patch] Manual Focus/Exposure/WB via Camera2 interop, gated on the HAL capabilities.
++  private val manualCapabilities: IntArray by lazy {
++    cameraCharacteristics?.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
++  }
++  private val hasManualSensor: Boolean
++    get() = android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in manualCapabilities
+   override val supportsFocusLocking: Boolean
+-    get() = false
++    get() =
++      hasManualSensor &&
++        (cameraCharacteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f) > 0f
+   override val supportsExposureLocking: Boolean
+-    get() = false
++    get() = hasManualSensor
+   override val supportsWhiteBalanceLocking: Boolean
+-    get() = false
++    get() = android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING in manualCapabilities
+ 
+   override val maxWhiteBalanceGain: Double
+-    get() = 0.0
++    get() = if (supportsWhiteBalanceLocking) com.margelo.nitro.camera.hybrids.ManualCamera2Controls.MAX_WB_GAIN else 0.0
+ 
+   override val supportsExposureBias: Boolean
+     get() = cameraInfo.exposureState.isExposureCompensationSupported

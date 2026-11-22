@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process');
 
 const target = process.argv[2];
 const root = path.join(__dirname, '..');
-const mtxPlatform = { mac: 'darwin_arm64', win: 'windows_amd64' }[target];
+const mtxPlatform = { mac: process.env.TALLY_ARCH === 'x64' ? 'darwin_amd64' : 'darwin_arm64', win: 'windows_amd64' }[target];
 if (!mtxPlatform) { console.error('usage: node build/package.js mac|win'); process.exit(2); }
 
 const exe = target === 'win' ? 'mediamtx.exe' : 'mediamtx';
@@ -21,12 +21,16 @@ fs.cpSync(path.join(root, 'bin', mtxPlatform), path.join(stage, 'bin', mtxPlatfo
 const args = ['.', 'Tally Hub', '--out=dist', '--overwrite', '--ignore=^/(dist|build|bin|\\.gitignore|mediamtx\\.yml)$',
   `--extra-resource=${path.join(stage, 'bin')}`, '--extra-resource=mediamtx.yml', '--app-bundle-id=com.tally.hub'];
 if (target === 'mac') {
+  // TALLY_SIGN_ID="Apple Development: Name (ID)" signs with your identity (macOS then remembers the firewall
+  // permission across launches). TALLY_SIGN_ID=- makes an ad-hoc build (what the public release ships).
   const id = process.env.TALLY_SIGN_ID;
   if (!id) {
-    console.error('Set TALLY_SIGN_ID to your signing identity, e.g.\n  TALLY_SIGN_ID="Apple Development: Name (TEAMID)" npm run package:mac\nList identities with: security find-identity -v -p codesigning\n(macOS only keeps firewall permissions for signed apps; an unsigned build blocks every camera.)');
+    console.error('Set TALLY_SIGN_ID, e.g.\n  TALLY_SIGN_ID="Apple Development: Name (TEAMID)" npm run package:mac   (signed; list identities with: security find-identity -v -p codesigning)\n  TALLY_SIGN_ID=- npm run package:mac                                     (ad-hoc; with the macOS firewall on you may need to click Allow again after updates)');
     process.exit(1);
   }
-  args.push('--platform=darwin', '--arch=arm64', '--icon=icon.icns', `--osx-sign.identity=${id}`);
+  const arch = process.env.TALLY_ARCH === 'x64' ? 'x64' : 'arm64';
+  args.push('--platform=darwin', `--arch=${arch}`, '--icon=icon.icns');
+  if (id !== '-') args.push(`--osx-sign.identity=${id}`);
 } else {
   // Cross-packaging from macOS/Linux works without Wine: @electron/packager 18 edits the .exe with pure-JS resedit.
   args.push('--platform=win32', '--arch=x64');

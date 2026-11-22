@@ -1,0 +1,11 @@
+node_modules/
+/ios/
+/android/
+.expo/
+dist/
+*.log
+modules/*/android/build/
+modules/*/android/.cxx/
+modules/*/android/.gradle/
+modules/*/ios/build/
+.claude/

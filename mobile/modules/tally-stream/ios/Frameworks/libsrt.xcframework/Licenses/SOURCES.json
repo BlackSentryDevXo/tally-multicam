@@ -1,0 +1,19 @@
+[
+  {
+    "name": "SRT",
+    "path": ".",
+    "version": "v1.5.7",
+    "commit": "899348d8318eb9a3c5a5b6ec43c4a1114288773a",
+    "sourceURL": "https://github.com/Haivision/srt/tree/899348d8318eb9a3c5a5b6ec43c4a1114288773a",
+    "license": "MPL-2.0",
+    "licenseFile": "LICENSE",
+    "modified": false,
+    "excludedSubmodules": [
+      {
+        "path": "submodules/abi-compliance-checker",
+        "commit": "7c175c45a8ba9ac41b8e47d8ebbab557b623b18e",
+        "reason": "Optional ABI analysis tool; not used in this build"
+      }
+    ]
+  }
+]

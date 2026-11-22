@@ -1,0 +1,8 @@
+{
+  "name": "tally-thermal",
+  "version": "1.0.0",
+  "description": "Device thermal state for Tally Cam",
+  "main": "index.js",
+  "private": true,
+  "license": "MIT"
+}

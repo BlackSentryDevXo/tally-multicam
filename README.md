@@ -1,123 +1,282 @@
-# Tally
+# Tally — synced multi-camera recording with phones
 
-Named after the red tally light that tells a crew which camera is live.
+**Turn phones into a synced multi-camera rig: one button records every iPhone and Android, live-switch them in OBS.**
 
-Press record once and every camera starts together: all the phones plus OBS. Before you roll, each tile shows the camera's picture as live video, its audio level, battery, storage and temperature. Each phone can also feed OBS live (up to 1080p60) for switching, while it records full quality on its own. After you stop, the clips copy to your computer.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Hub](https://img.shields.io/badge/hub-macOS%20%7C%20Windows-lightgrey.svg)](#quick-start)
+[![Cameras](https://img.shields.io/badge/cameras-iOS%20%7C%20Android%208%2B-lightgrey.svg)](#quick-start)
+[![Release](https://img.shields.io/github/v/release/BlackSentryDevXo/tally-multicam)](https://github.com/BlackSentryDevXo/tally-multicam/releases)
 
-- `hub/`: **Tally Hub**, the desktop control room (Electron, macOS and Windows)
-- `mobile/`: **Tally Cam**, the pro camera app for phones (Expo / React Native, Android 8+ and iOS)
+![Tally Hub with three cameras](docs/images/hub-main.png)
 
-## First-time setup
+Tally is named after the red tally light that tells a crew which camera is live. It has two parts:
 
-### Tally Hub on a Mac
-```sh
-cd hub && npm install
-npm run fetch:mediamtx        # live-feed server (MediaMTX, MIT): pinned version, sha256-checked, into hub/bin/<platform>/
-npm start                     # dev copy: own settings folder ("Tally Hub Dev"), never touches the installed app
-```
-Clips are saved to `~/Movies/Tally/<date>_<session>/<camera name>.mp4` (the computer's local date; running the same session name twice in a day adds the time, so takes never share a folder).
+- **Tally Hub**: the control room on your Mac or Windows PC (`hub/`, Electron).
+- **Tally Cam**: a pro camera app for iPhone and Android (`mobile/`, Expo / React Native, VisionCamera).
 
-Closing the Tally Hub window quits it, on macOS too: it's a single-window control app. If a take is recording or clips are still copying, it asks first. While a take runs, clips copy or any camera is connected, Tally Hub keeps the computer from going to sleep.
+Press **REC** once and every phone, plus OBS, starts recording at the same instant. Each tile shows that camera's
+live picture, audio level, battery, storage and temperature. Phones can also feed OBS live (up to 1080p60) while
+they record full quality on their own, and when you press **STOP** every clip copies to your computer.
 
-To build it as a normal Mac app (**Tally Hub** in Applications), it must be **signed**, so macOS remembers the firewall permission. Unsigned (ad-hoc) builds are blocked silently and phones can't connect:
-```sh
-security find-identity -v -p codesigning            # pick your "Apple Development: Name (TEAMID)" line
-TALLY_SIGN_ID="Apple Development: Name (TEAMID)" npm run package:mac
-rm -rf "/Applications/Tally Hub.app" && cp -R "dist/Tally Hub-darwin-arm64/Tally Hub.app" /Applications/
-```
-Signing covers the bundled MediaMTX too. On first launch macOS asks whether Tally Hub (and `mediamtx`) may **accept incoming connections**: click **Allow**. If the hub shows the **"macOS Firewall is blocking cameras"** banner, click **Allow Tally Hub**; it asks for your Mac password through the standard macOS prompt.
-To regenerate the icons after changing the mark in `hub/build/icons.js`: `npm run icons`.
+## Why Tally
 
-### Tally Hub on a Windows PC
-Build from any computer (no Wine needed; the packager edits the .exe in pure JavaScript):
-```sh
-cd hub && npm install
-node build/fetch-mediamtx.js windows_amd64
-npm run package:win                                 # -> dist/Tally Hub-win32-x64/
-```
-`package:win` runs the packager through Node itself, so it also works when run on a Windows PC. Copy the `Tally Hub-win32-x64` folder to the PC and run `Tally Hub.exe`. On first launch **Windows Defender Firewall** asks to allow **Tally Hub** and **mediamtx.exe**: click **Allow access** with *Private networks* ticked, or no camera can connect. Clips are saved to `Videos\Tally\`. The Windows build is cross-packaged from macOS and has **not yet been run on a real Windows PC**; the hub's code paths are platform-aware (paths, firewall hints, MediaMTX binary) but expect to test it once.
+Churches, podcasts and small studios often film with the phones they already have: a wide shot, one on the host,
+one on the guest. Running around to start and stop each one, guessing at framing, and lining up clips afterwards
+wastes time and loses takes. Tally makes the phones behave like one camera system: framed from one screen,
+started and stopped together, matched in settings, monitored for battery and heat, and copied back automatically.
 
-### Tally Cam on Android (Android 8+)
-Plug the phone in over USB with USB debugging on:
-```sh
-cd mobile && npm install && npx expo run:android --variant release
-```
-To sideload on other phones, use the APK in `mobile/android/app/build/outputs/apk/release/`.
+## Features
 
-### Tally Cam on iPhone
-Plug the iPhone into the Mac:
-```sh
-cd mobile && npx expo run:ios --device --configuration Release
-```
-With a free Apple account the app expires after 7 days. Rerun the command to reinstall.
+**Recording & sync**
+- One button (or **Space**) starts and stops every phone and OBS together, clock-synced across Wi-Fi (phones
+  typically start within a few frames of each other).
+- A start beep gives editors a clean spike for *sync by audio* (DaVinci Resolve, Premiere) to get frame-perfect.
+- Any phone's own record button starts and stops **all** cameras, so the person at a camera can roll the shoot.
+- **Apply to all**: one resolution, frame rate, codec, stabilization and HDR setting for every camera.
+- Finished clips copy to `~/Movies/Tally/<date>_<session>/<camera>.mp4` (Windows: `Videos\Tally\`), and a backup
+  copy is saved to each phone's gallery. Nothing is ever deleted from the phones.
 
-### OBS (optional)
-In OBS, go to Tools → WebSocket Server Settings → Enable, and copy the password. In Tally Hub, open **OBS**, tick the box and paste the password.
+**Pro camera (Tally Cam)**
+- Lens chips (0.5×, 1×, telephoto, front), pinch to zoom.
+- Tap to focus and expose; **double-tap or long-press for AE/AF lock**; drag to adjust exposure.
+- Manual focus, ISO, shutter and white balance with scrub rulers that only move on a deliberate sideways drag
+  (iPhone, and Android phones that support manual sensor control, e.g. Galaxy S21).
+- One-tap resolution and frame-rate picker that only offers what the lens supports (4K60 only where it works);
+  HEVC/H.264 (iPhone), stabilization, HDR.
+- Mains 50/60 Hz flicker warnings with shutter-angle readout, and a **Podcast** preset (25/30 fps, 180° shutter,
+  locked white balance, stabilization off).
+- Grid, histogram, optional audio meter, battery, storage, time-left and temperature in a compact status line.
+- The controls rotate themselves with the phone, so the iPhone's Portrait Lock can stay on.
+- Dims the screen while recording to save heat and battery; tap to wake.
 
-**Live camera feeds in OBS:** pick a quality under **Live** in the toolbar: 720p30, 1080p30 or 1080p60 (25/50 when **Mains power** in Settings is 50 Hz, to match local lighting). Then click **Add to OBS**. Tally Hub creates one *Media Source* per phone, named `Tally · <camera>`, a **Tally Cameras** multiview scene, and a full-frame scene **Tally – <camera>** for each, ready to switch. Running it again updates them without duplicates. Each tile's green **LIVE** badge shows the bitrate the hub is receiving, with **OBS** once OBS is reading it.
+**Live to OBS**
+- Each phone hardware-encodes H.264 and streams it over SRT to the hub: 720p30, 1080p30 or 1080p60
+  (25/50 fps for 50 Hz regions).
+- **Add to OBS** creates one Media Source per camera, a multiview scene, and a full-frame scene per camera,
+  ready to switch. Running it again updates instead of duplicating.
+- OBS start/stop recording follows the hub's REC button (via OBS's built-in WebSocket).
 
-## Tile previews
-Each tile plays the phone's picture as real video. iPhones send a light **monitor feed** (720p, 25/30 fps, about 2.5 Mb/s, hardware-encoded) to the hub's media server, and the tile plays it back through WebRTC on the same computer: smooth motion, about half a second behind. When a Live quality is selected, that feed replaces the monitor feed and the tile plays the same stream OBS gets. The blue **MON** badge shows the monitor feed and its bitrate.
+**Monitoring**
+- Smooth tile video (hardware-encoded 720p monitor feed, played over WebRTC on the same computer), with JPEG
+  snapshots as fallback.
+- Per-camera chips: battery, recording time left, temperature (Warm/Hot/Critical, °C on Android), audio meter.
+- Pre-record check warns about offline phones, low battery, low storage or hot phones.
+- Remote control per camera: lens, zoom, exposure, torch, tap-to-focus on the tile, AE/AF/WB lock.
 
-- **Heat:** the feed uses the phone's hardware encoder, so the cost is small, but on a hot day or a long shoot you can turn it off: **Settings → Smooth preview (iPhone)**. Tiles then fall back to snapshots, up to 12 per second while the tile is on screen (1 per second when the window is hidden).
-- **Android:** off by default. The extra camera stream can affect 4K recording on some Android phones. Turn on **Settings → Smooth preview on Android too** to try it; check a test clip afterwards.
-- Snapshots keep arriving at 1 per second behind the video, so a tile never goes black if the feed drops. The last picture stays on the tile when a phone goes offline.
+**Reliability**
+- A phone that drops off Wi-Fi keeps recording and copies its clip when it's back.
+- If the hub crashes or is quit mid-take, the phones keep recording and the reopened hub picks the take up again.
+- Clips are recorded to the phone's documents folder and recovered after a crash; uploads retry with backoff.
+- Heat protection: live feeds step down (30 fps, lower bitrate, then off) when a phone gets hot; the local
+  recording always wins.
+- The hub keeps the computer awake while recording, uploading or connected.
 
-## Tally Cam
-It works like a stock camera app, with pro controls:
-- **Lenses:** one-tap switching between ultra-wide (0.5×), wide (1×), telephoto and front, plus pinch to zoom.
-- **Focus and exposure:** tap to focus and expose, double-tap or long-press for an AE/AF lock, drag to adjust exposure.
-- **Manual mode:** focus, ISO, shutter and white balance, with scrub rulers that only move on a deliberate sideways drag.
-- **Format picker:** resolution, frame rate, codec (HEVC/H.264), stabilization, HDR; mains-frequency flicker warnings; a Podcast preset.
-- **Framing aids:** grid, histogram, an optional audio meter, battery, storage and temperature.
-- **Rotation:** Tally Cam rotates its controls itself from the phone's physical orientation, so the iPhone's **Portrait Lock can stay on**. Recordings are tagged with the right orientation either way.
-- **Record button:** when the phone is connected to the hub, its record button starts and stops **all** cameras, so the person at the camera can roll the whole shoot. With no connection it records on its own, and the clip copies to the hub later.
-
-## On the day
-1. Computer and phones on the **same Wi-Fi**. Church Wi-Fi often blocks devices from seeing each other. If phones won't connect, use the computer's hotspot or a small dedicated router. If no phone connects within 30 s, the pairing dialog lists what to check.
-2. Open Tally Hub. On each phone, open Tally Cam, name the camera ("Wide", "Pastor", "Guest") and scan the code from **Pair camera**. Phones remember the hub after that.
-3. Plug the phones into power. Turn on Do Not Disturb. On iPhone, use Guided Access so the app stays open, because iOS stops the camera in the background.
-4. In the hub: **Apply to all** for one format everywhere. Click a preview to focus there. **Lock AE/AF/WB** so colour and brightness don't drift.
-5. Name the session and press **REC** (or **Space**). The computer beeps at the start: that beep is your sync point.
-6. Press **STOP**. Each tile shows a progress bar, then ✓ copied. Every clip is also saved to the phone's gallery. Nothing is deleted from the phones automatically.
-
-**Camera controls → Close camera** disconnects a phone for now (it reconnects when someone taps it on the phone). **Forget camera** makes the phone drop the pairing and return to its pairing screen.
-
-## Editing
-Clips start within a few frames of each other. For frame-perfect alignment, use your editor's audio sync: DaVinci Resolve → *Auto Sync Audio → Based on Waveform*, or Premiere → *Synchronize → Audio*. The start beep gives it a clean spike to lock onto.
-
-## If something goes wrong
-- **A phone drops off Wi-Fi mid-take:** it keeps recording. When it reconnects after the take, the hub stops it and the clip uploads. The hub only ever stops takes it started itself: a take recorded on the phone without a hub (standalone) is never stopped by reconnecting.
-- **The hub crashed or was quit mid-take:** the phones keep recording. Reopen Tally Hub: it picks the running take up again (REC stays lit, phones aren't stopped), and STOP works as normal.
-- **Close camera on a recording phone:** that phone's recording is stopped first, so its clip is finished and queued; the other cameras keep recording.
-- **An upload fails:** the phone retries, and the clip stays in its gallery. A copy that stalls for a minute (phone left the Wi-Fi) is dropped and retried later; half-copied files are removed, so a clip never appears twice. Quitting the hub while clips are copying asks you to wait up to 10 s.
-- **The hub log shows "X started (N ms after target)":** that's how late each phone started. Under ~100 ms is normal.
-- **A tile meter shows "no audio":** the phone's audio meter is off (the default when you record with external mics) or it lacks microphone permission.
-- **A tile chip turns amber "Warm" or red "Hot":** the phone is heating up. Shade it, give it airflow, lower the live-feed quality or turn off Smooth preview, or take a break. The hub warns before recording if any phone is hot.
-- **A tile shows "NO MONITOR" / "NO FEED":** the phone isn't sending its feed. Check it's online, that MediaMTX is running (the log says if it's missing) and that the firewall allows `mediamtx` (UDP 8890).
-- **"macOS Firewall is blocking cameras":** click **Allow Tally Hub**. If it says the app is ad-hoc signed, rebuild it with `npm run package:mac` and a signing identity.
-- **Log file:** Settings → **Open log** (`~/Library/Application Support/Tally Hub/hub.log` on a Mac, `%APPDATA%\Tally Hub\hub.log` on Windows). It holds the activity history, MediaMTX output and any internal errors.
+| Pairing | Recording |
+|---|---|
+| ![Pair a camera dialog](docs/images/hub-pair.png) | ![Three cameras recording](docs/images/hub-recording.png) |
 
 ## How it works
-Star network: each phone opens a WebSocket to the hub on port 7777. The pairing code `tally://<name>.local,<ip>,…:7777?key=<key>&name=<computer>` lists the hub's Bonjour name and every LAN address (the phone tries them in order) plus a key. Connections or uploads without the key are rejected, and nothing is answered before a valid `hello`. Phones measure their clock offset to the hub with NTP-style pings (`mobile/clock.js`). REC sends "start at hub time T+1.5 s", so every phone starts at the same instant regardless of Wi-Fi lag. Finished clips stream to `POST /upload` on the hub.
 
-| Phone → Hub | Hub → Phone |
-|---|---|
-| `hello {key,id,name,platform,status}` | `pong {t0,hubT}` |
-| `ping {t0}` | `record {session,atHubMs}` / `stop {atHubMs}` |
-| `status {battery,charging,free,recording,duration,settings,lenses,orientation,session,remainingSec,preview,thermal,stream}` | `settings {res,fps,lens,zoom,exposure,torch,stabilization,hdr,codec}` |
-| `level {db}` (peak dBFS, ~5 Hz) | `focus {x,y}` (0–1) / `lock {on}` |
-| `requestRecord` / `requestStop` (starts/stops all) | `stream {on,role,url,width,height,fps,bitrateKbps,profile}` |
-| binary JPEG preview, `started {lateMs}`, `error {message}` | `preview {fps,maxWidth}` (snapshot rate) |
-| | `close {reason}` (disconnect, keep pairing) / `forget` (drop pairing) |
+```mermaid
+flowchart LR
+  subgraph Phones["Phones: Tally Cam"]
+    A[iPhone]
+    B[Android]
+  end
+  subgraph Computer["Computer: Tally Hub"]
+    H[Hub app]
+    M[MediaMTX]
+    D[(Movies/Tally)]
+  end
+  O[OBS Studio]
+  A & B -- "WebSocket :7777<br/>control, status, snapshots" --> H
+  A & B -- "SRT :8890<br/>H.264 monitor / live feeds" --> M
+  A & B -- "HTTP upload<br/>finished clips" --> D
+  M -- "WebRTC, localhost<br/>tile video" --> H
+  M -- "SRT, localhost<br/>Media Sources" --> O
+  H -- "obs-websocket<br/>start/stop, Add to OBS" --> O
+```
 
-`platform` is `ios` or `android`. `lenses` is any of `ultra`, `wide`, `tele`, `front`. `preview` is `ok`/`unavailable`; `thermal` is `{level 0–3, tempC}`; `stream` is `{state, width, height, fps, kbps, error}`. `stream.role` is `monitor` (hub tiles) or `live` (OBS); `profile` is `main`, which Chromium's WebRTC decoder is safe with.
+The full message reference is in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-**Feeds:** each phone hardware-encodes H.264 and pushes MPEG-TS over SRT (caller) to MediaMTX on the hub, `srt://<hub>:8890?streamid=publish:cam-<id>:tally:<password>`. The password is derived from the pairing key, and only `publish` is allowed from the network. Reading streams and the MediaMTX API need the hub's own local user `hubread` with a random password stored in the hub's `config.json`, and only from this computer; browsers get no CORS access. So a web page open on the hub computer can't watch the cameras or reconfigure the server. On the hub, OBS reads `srt://127.0.0.1:8890?streamid=read:cam-<id>:hubread:<password>` (Media Source: `input_format=mpegts`, hardware decode, buffering 0 MB, reconnect 1 s, `fflags=nobuffer flags=low_delay`), and the tiles read WebRTC (WHEP) from `http://127.0.0.1:8889/cam-<id>/whep`, localhost only, no STUN/TURN; the hub's main process does the signalling with the credentials, and the page itself never touches the network. **Add to OBS** writes the credentials into each source, and every time OBS connects the hub refreshes any existing `Tally · …` sources, so sources made by an older version keep working. SRT latency is 120 ms (`srtMinLatency` in `hub/mediamtx.yml`). The hub reads MediaMTX's local API (127.0.0.1:9997) for the per-camera bitrate and whether OBS is reading.
+## Quick start
 
-**Snapshot rate:** the hub tells each phone how many JPEG snapshots to send (`preview`): 12/s while its tile is on screen with no video playing, 1/s behind video, 2/s when the window is hidden. Only what is on screen costs the phone anything.
+Download the latest build from **[Releases](https://github.com/BlackSentryDevXo/tally-multicam/releases)**.
 
-Test the sync math with: `cd mobile && npm test`
+### Tally Hub: macOS (Apple silicon)
+1. Download `Tally-Hub-macOS-arm64.zip`, unzip it and move **Tally Hub** to Applications.
+2. **First launch:** the app isn't notarized by Apple, so right-click **Tally Hub → Open → Open**
+   (or System Settings → Privacy & Security → **Open Anyway**). After that it opens normally.
+3. If macOS asks whether Tally Hub (and `mediamtx`) may **accept incoming connections**, click **Allow**.
+   See [macOS firewall](#macos-firewall) if cameras can't connect.
 
-## Not built yet
-- **Over-the-internet mode:** same protocol through a cloud relay keyed by room code.
+Intel Macs: run it from source (see [Building from source](#building-from-source)); packaged Intel builds are on
+the roadmap.
+
+### Tally Hub: Windows (x64)
+1. Download `Tally-Hub-Windows-x64.zip`, unzip it anywhere and run `Tally Hub.exe`.
+2. **SmartScreen** may warn that the app is unrecognized: click **More info → Run anyway**.
+3. When **Windows Defender Firewall** asks about **Tally Hub** and **mediamtx.exe**, click **Allow access** with
+   *Private networks* ticked, or no camera can connect.
+
+> The Windows build is cross-packaged and has **not yet been tested on a real Windows PC**. The hub's code paths
+> are platform-aware (paths, firewall hints, MediaMTX binary), but please report anything that doesn't work.
+
+### Tally Cam: Android (8.0 and newer)
+Download `Tally-Cam-Android.apk` to the phone and open it (allow *Install unknown apps* for your browser or file
+manager when asked).
+
+### Tally Cam: iPhone
+Apple only allows App Store / TestFlight distribution, so you build it yourself with your own Apple account (free
+or paid): see [iPhone](#tally-cam-iphone-1). With a free account the app has to be reinstalled every 7 days.
+
+### Pair and shoot
+1. Put the computer and phones on the **same Wi-Fi**.
+2. In Tally Hub click **Pair camera**. On each phone open Tally Cam, name the camera ("Wide", "Pastor", "Guest")
+   and scan the code. Phones remember the hub after that.
+3. Press **REC**. Press **STOP**. Clips appear in your Tally recordings folder.
+
+## On the day: checklist
+
+1. **Network:** computer and phones on the same Wi-Fi. Guest and church networks often block devices from seeing
+   each other (client isolation); use the computer's hotspot or a small dedicated router instead. If no phone
+   connects within 30 s, the pairing dialog lists what to check.
+2. **Power:** plug the phones in for long sessions. Turn on Do Not Disturb.
+3. **iPhone:** keep Tally Cam in the foreground (iOS stops the camera in the background). Guided Access helps.
+4. **Settings:** **Apply to all** for one format everywhere. In 50 Hz countries (Europe, Africa, most of Asia)
+   use 25 or 50 fps to avoid flicker (Settings → Mains power).
+5. **Framing:** click a tile to focus there, then **Lock** AE/AF/WB so colour and brightness don't drift.
+6. **Roll:** name the session and press **REC** (or **Space**). The beep at the start is your sync point.
+7. **Wrap:** press **STOP**. Each tile shows a progress bar, then ✓ copied.
+
+**Camera controls → Close camera** disconnects a phone for now (it reconnects when someone taps it on the phone);
+**Forget camera** makes the phone drop the pairing and return to its pairing screen.
+
+## Live switching in OBS
+
+1. In OBS: **Tools → WebSocket Server Settings → Enable**, and copy the password.
+2. In Tally Hub: click **OBS**, tick the box, paste the password.
+3. Pick a quality under **LIVE**: 720p30, 1080p30 or 1080p60.
+4. Click **Add to OBS**. You get `Tally · <camera>` Media Sources, a **Tally Cameras** multiview scene, and a
+   `Tally – <camera>` scene for each phone. Switch between them like any other scene.
+
+Each tile's **LIVE** badge shows the bitrate the hub receives, plus **OBS** once OBS is reading it. Expect a
+fraction of a second of delay on a good network. Three phones at 1080p60 need roughly 36 Mb/s of Wi-Fi; use 5 GHz.
+
+## Editing
+
+Clips start within a few frames of each other. For frame-perfect alignment, use your editor's audio sync:
+DaVinci Resolve → *Auto Sync Audio → Based on Waveform*, or Premiere → *Synchronize → Audio*. The start beep gives
+it a clean spike to lock onto.
+
+## Building from source
+
+Requirements: Node.js 20+ and npm. Phones also need the Android SDK (with JDK 21) and/or Xcode.
+
+### Tally Hub
+```sh
+cd hub
+npm install
+npm run fetch:mediamtx        # MediaMTX for this machine (pinned version, sha256-checked) into hub/bin/<platform>/
+npm start                     # dev copy with its own settings folder ("Tally Hub Dev")
+npm test                      # integration test: starts its own hub on test ports and simulates phones
+```
+Intel Macs: `node build/fetch-mediamtx.js darwin_amd64`, then `npm start`.
+
+**Package for macOS (Apple silicon):**
+```sh
+security find-identity -v -p codesigning      # pick an "Apple Development: Name (ID)" line
+TALLY_SIGN_ID="Apple Development: Name (ID)" npm run package:mac
+```
+Any Apple Development identity works, including one from a free Apple ID added in Xcode. Signing your own copy
+makes the macOS firewall remember its permission (see [macOS firewall](#macos-firewall)).
+
+**Package for Windows** (works from macOS too, no Wine needed):
+```sh
+node build/fetch-mediamtx.js windows_amd64
+npm run package:win                            # -> dist/Tally Hub-win32-x64/
+```
+
+### Tally Cam: Android
+```sh
+cd mobile
+npm install                                    # also applies the VisionCamera patch (patch-package)
+npm test                                       # clock-sync, pairing and layout tests
+npx expo run:android --variant release         # build and install on a USB-connected phone
+```
+The APK lands in `mobile/android/app/build/outputs/apk/release/`.
+
+**Signing with your own release key:** create `~/.tally/signing.properties` (never commit it):
+```properties
+TALLY_UPLOAD_STORE_FILE=/absolute/path/to/your-release.keystore
+TALLY_UPLOAD_KEY_ALIAS=yourAlias
+TALLY_UPLOAD_STORE_PASSWORD=…
+TALLY_UPLOAD_KEY_PASSWORD=…
+```
+You can also set the same names as environment variables. Without a key, release builds use the debug key, which
+is fine for testing but not for distributing. Back up your keystore: every update must be signed with the same key.
+
+### Tally Cam: iPhone
+```sh
+cd mobile
+npm install
+mkdir -p ~/.tally && echo "YOURTEAMID" > ~/.tally/apple-team-id   # or: export APPLE_TEAM_ID=YOURTEAMID
+npx expo run:ios --device --configuration Release
+```
+Find your Team ID in Xcode → Settings → Accounts → your team (or at developer.apple.com → Membership). With a
+free account the app expires after 7 days; rerun the command to reinstall.
+
+## Troubleshooting
+
+### macOS firewall
+The macOS firewall is **off by default** on most Macs, and then nothing is needed. If it's on:
+- macOS asks whether Tally Hub may accept incoming connections: click **Allow**. Tally Hub also shows a
+  **"macOS Firewall is blocking cameras"** banner with an **Allow Tally Hub** button.
+- The release build is ad-hoc signed (not tied to a developer certificate), and macOS may not keep **Allow** for
+  it across launches or updates. Either click **Allow** (or the banner) again when it appears, or sign your own
+  copy with any Apple Development identity (`TALLY_SIGN_ID=… npm run package:mac`; a free Apple ID works), which
+  makes the permission stick.
+
+### Other issues
+- **Phone stuck on "Searching for Tally Hub…":** same Wi-Fi? Firewall allowed? On iPhone: Settings → Privacy &
+  Security → **Local Network** → Tally Cam **on**. Guest Wi-Fi with client isolation blocks phones from reaching
+  the computer.
+- **"Pairing rejected":** the hub's key changed; scan the code again.
+- **Tile says "No preview from this camera yet":** the phone isn't sending pictures; check it's online and see the
+  hub log for the reason.
+- **Tile shows "NO MONITOR" / "NO FEED":** the phone isn't sending its video feed. Check that MediaMTX is running
+  (the log says if it's missing) and that the firewall allows `mediamtx` (UDP 8890).
+- **"Warm" / "Hot" chips:** shade the phone, give it airflow, lower the live quality or turn off
+  Settings → Smooth preview. The hub warns before recording if a phone is hot.
+- **Android 8–9 and budget phones:** manual ISO/shutter/focus/WB only appear on phones that support manual sensor
+  control. The live feed on Android uses an extra camera stream and a CPU copy; if 4K recording or the feed
+  struggles, use 720p30 live or keep live off. The optional audio meter pauses during recording on Android 8–9.
+- **A clip didn't copy:** it stays on the phone (and in its gallery) and retries automatically.
+- **Log file:** Settings → **Open log** (`~/Library/Application Support/Tally Hub/hub.log`, or
+  `%APPDATA%\Tally Hub\hub.log` on Windows).
+
+## Roadmap
+
+- Over-the-internet mode (a cloud relay keyed by room code) for cameras that aren't on the same network.
+- A Windows build tested on real PCs, and a packaged Intel Mac build.
+- TestFlight / App Store and Play Store distribution.
+
+## Contributing
+
+Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). Bundled third-party components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Acknowledgements
+
+Built on
+[react-native-vision-camera](https://github.com/mrousavy/react-native-vision-camera),
+[MediaMTX](https://github.com/bluenviron/mediamtx),
+[SRT](https://github.com/Haivision/srt),
+[RootEncoder](https://github.com/pedroSG94/RootEncoder),
+[Expo](https://expo.dev),
+[Electron](https://www.electronjs.org) and
+[OBS Studio](https://obsproject.com).

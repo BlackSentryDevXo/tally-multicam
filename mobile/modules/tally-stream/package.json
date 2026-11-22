@@ -1,0 +1,20 @@
+{
+  "name": "react-native-tally-stream",
+  "version": "1.0.0",
+  "description": "Tally Cam live feed: hardware H.264 over SRT, as a VisionCamera v5 custom CameraOutput",
+  "main": "src/index.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "types": "src/index.ts",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "specs": "npx -y nitrogen@0.37.2"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*",
+    "react-native-nitro-modules": "*",
+    "react-native-vision-camera": "*"
+  }
+}

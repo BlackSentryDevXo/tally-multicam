@@ -8,11 +8,12 @@
     "fetch:mediamtx": "node build/fetch-mediamtx.js",
     "package:mac": "node build/package.js mac",
     "package:win": "node build/package.js win",
-    "icons": "electron build/icons.js"
+    "icons": "electron build/icons.js",
+    "test": "node test/run.js"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "BlackSentryDevXo",
+  "license": "MIT",
   "dependencies": {
     "obs-websocket-js": "^5.0.8",
     "qrcode": "^1.5.4",
@@ -22,5 +23,9 @@
     "@electron/packager": "^20.3.0",
     "electron": "^45.4.1"
   },
-  "productName": "Tally Hub"
+  "productName": "Tally Hub",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BlackSentryDevXo/tally-multicam.git"
+  }
 }

@@ -1,0 +1,27 @@
+Source availability and third-party notices
+
+This distribution contains SRT, including its bundled UDT-derived and MD5 code.
+The SRT covered source is available under MPL-2.0; original per-file notices are preserved.
+Obtain the exact source from the commit URLs below or libsrt-sources.zip
+attached to the same GitHub Release as this XCFramework:
+https://github.com/HaishinKit/libsrt-xcframework/releases
+The source ZIP includes all tracked SRT sources, original notices and upstream build files.
+The optional abi-compliance-checker submodule is not used in the build and is excluded.
+Its exact revision and exclusion reason are recorded in SOURCES.json.
+No upstream source modifications were made for this distribution.
+
+SRT (MPL-2.0)
+Version/revision: v1.5.7
+Commit: 899348d8318eb9a3c5a5b6ec43c4a1114288773a
+Source: https://github.com/Haivision/srt/tree/899348d8318eb9a3c5a5b6ec43c4a1114288773a
+Local modifications: none
+
+OpenSSL is a separate runtime dependency, not embedded in this source/binary archive.
+OpenSSL-Package: https://github.com/krzyzanowskim/OpenSSL-Package
+OpenSSL license: https://www.openssl.org/source/license.html
+App distributors must include the license and applicable notices for their actual
+resolved OpenSSL version in addition to these bundled-component notices.
+
+App redistribution: preserve these license texts and source-availability notices
+in the app documentation/resources or an accessible Open Source Licenses screen.
+SwiftPM does not automatically copy this XCFramework metadata into your app.
