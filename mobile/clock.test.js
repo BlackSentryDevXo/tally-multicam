@@ -1,6 +1,6 @@
 // Run: node clock.test.js
 import assert from 'node:assert';
-import { computeOffset, waitUntil } from './clock.js';
+import { computeOffset, waitUntil, srtLatency } from './clock.js';
 
 const OFFSET = 5000;
 const samples = [];
@@ -18,4 +18,9 @@ await waitUntil(target);
 const late = Date.now() - target;
 assert(late >= 0 && late <= 2, `waitUntil late by ${late} ms`);
 
+const rt = (ms) => Array.from({ length: 10 }, (_, i) => ({ t0: 0, t1: i === 9 ? ms * 3 : ms }));
+assert.equal(srtLatency([]), 120); // not measured yet
+assert.equal(srtLatency(rt(5)), 120); // clean LAN: floor
+assert.equal(srtLatency(rt(30)), 120); // the median ignores the one 90 ms spike
+assert.equal(srtLatency(rt(80)), 250); // slow link: cap
 console.log(`clock ok (offset error ${est - OFFSET} ms, wait error ${late} ms)`);

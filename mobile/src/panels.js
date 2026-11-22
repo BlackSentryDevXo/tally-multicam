@@ -211,7 +211,7 @@ export function FormatSheet({ caps, settings, recording, landscape, size, insets
         <Toggle label="Rule-of-thirds grid" value={settings.grid} onChange={(v) => onSet({ grid: v })} />
         <Toggle label="Histogram" value={settings.histogram} disabled={!snapshots} onChange={(v) => onSet({ histogram: v })}
           hint={snapshots ? 'Brightness spread of the image. Keep the right edge from piling up (clipped highlights).' : 'Not available on this phone yet.'} />
-        <Toggle label="Dim screen while recording" value={settings.recSaver} onChange={(v) => onSet({ recSaver: v })}
+        <Toggle label="Dim screen while recording or live" value={settings.recSaver} onChange={(v) => onSet({ recSaver: v })}
           hint="After 5 s untouched the screen goes dark to cut heat and battery. Tap to wake." />
         <Toggle label="Audio meter" value={settings.meter} disabled={locked} onChange={(v) => onSet({ meter: v })} last
           hint={locked ? 'Change after this take: the phone’s audio setup is never touched mid-recording.' : 'Off by default: your show audio comes from the mics. Turn on to check the phone’s reference sound.'} />

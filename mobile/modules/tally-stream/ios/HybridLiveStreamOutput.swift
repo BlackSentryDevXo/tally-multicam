@@ -26,7 +26,8 @@ final class HybridLiveStreamOutput: HybridCameraOutputSpec, NativeCameraOutput {
   private let queue = DispatchQueue(label: "com.tally.stream.capture", qos: .userInitiated)
   private let delegate: SampleDelegate
   private let targetLongestEdge: Int
-  private static let pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+  /// Until the camera format is known; then the format's own 8-bit NV12 flavour (see `pixelFormat(for:)`).
+  private static let defaultPixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
 
   var outputOrientation: CameraOrientation = .up {
     didSet {
@@ -46,8 +47,8 @@ final class HybridLiveStreamOutput: HybridCameraOutputSpec, NativeCameraOutput {
     self.targetLongestEdge = Int(max(targetWidth, targetHeight))
     super.init()
 
-    // NV12 full range: what VideoToolbox (H.264 and JPEG) encodes natively, no conversion.
-    output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: HybridLiveStreamOutput.pixelFormat]
+    // NV12: what VideoToolbox (H.264 and JPEG) encodes natively, no conversion.
+    output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: HybridLiveStreamOutput.defaultPixelFormat]
     output.alwaysDiscardsLateVideoFrames = true
 
     delegate.onSample = { [weak streamer] sampleBuffer in
@@ -92,6 +93,7 @@ final class HybridLiveStreamOutput: HybridCameraOutputSpec, NativeCameraOutput {
           let device = (connection.inputPorts.first?.input as? AVCaptureDeviceInput)?.device
     else { return }
     let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+    let pixelFormat = HybridLiveStreamOutput.pixelFormat(for: device.activeFormat)
     var sourceW = Int(dims.width)
     var sourceH = Int(dims.height)
     guard sourceW > 0, sourceH > 0 else { return }
@@ -112,10 +114,20 @@ final class HybridLiveStreamOutput: HybridCameraOutputSpec, NativeCameraOutput {
       }
     }
 
-    let formatOnly: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: HybridLiveStreamOutput.pixelFormat]
+    let formatOnly: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat]
+    if requested == nil, max(sourceW, sourceH) <= targetLongestEdge {
+      // Already no bigger than the target (e.g. a 1080p format for a 1080p feed): the sensor's own buffers,
+      // no scaler pass. Preview-sized buffers would be resampled to screen size, then rescaled by the encoder.
+      let error = TallyTryCatch {
+        self.output.automaticallyConfiguresOutputBufferDimensions = false
+        self.output.deliversPreviewSizedOutputBuffers = false
+        self.output.videoSettings = formatOnly
+      }
+      if error == nil { return }
+    }
     if let requested {
       let settings: [String: Any] = [
-        kCVPixelBufferPixelFormatTypeKey as String: HybridLiveStreamOutput.pixelFormat,
+        kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
         kCVPixelBufferWidthKey as String: requested.width,
         kCVPixelBufferHeightKey as String: requested.height,
       ]
@@ -160,6 +172,17 @@ final class HybridLiveStreamOutput: HybridCameraOutputSpec, NativeCameraOutput {
     case .down: return .portraitUpsideDown
     case .left: return .landscapeRight
     case .right: return .landscapeLeft
+    }
+  }
+
+  /// The NV12 range the sensor format already produces (420v or 420f), so the capture pipeline hands the
+  /// encoder its own buffers instead of running a range conversion per frame. 10-bit/HDR formats need a
+  /// conversion to 8-bit for H.264 anyway; they get video range (what an HDR format's SDR tone-map uses).
+  private static func pixelFormat(for format: AVCaptureDevice.Format) -> OSType {
+    switch CMFormatDescriptionGetMediaSubType(format.formatDescription) {
+    case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange: return kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+    case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+    default: return kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
     }
   }
 

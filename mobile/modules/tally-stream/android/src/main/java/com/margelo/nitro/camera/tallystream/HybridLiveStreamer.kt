@@ -1,24 +1,21 @@
 package com.margelo.nitro.camera.tallystream
 
-import androidx.camera.core.ImageProxy
+import androidx.annotation.Keep
+import com.facebook.proguard.annotations.DoNotStrip
+
 import com.margelo.nitro.core.ArrayBuffer
 
-/** Nitro facade: live SRT feed (LiveEngine) + hub thumbnails (Thumbnailer), fed by HybridLiveStreamOutput. */
+/** Nitro facade: live SRT feed (LiveEngine) + hub thumbnails (Thumbnailer), fed by HybridLiveStreamOutput's GlRenderer. */
+// Looked up by name from C++ (JNI): R8 must not rename or strip it in release builds.
+@Keep
+@DoNotStrip
 class HybridLiveStreamer : HybridLiveStreamerSpec() {
   @Volatile private var stateListener: ((LiveStreamStats) -> Unit)? = null
   @Volatile private var thumbnailListener: ((ArrayBuffer, Double, Double) -> Unit)? = null
 
-  private val engine = LiveEngine { stats -> stateListener?.invoke(stats) }
-  private val thumbnailer = Thumbnailer { jpeg, w, h ->
+  internal val engine = LiveEngine { stats -> stateListener?.invoke(stats) }
+  internal val thumbnailer = Thumbnailer { jpeg, w, h ->
     thumbnailListener?.invoke(ArrayBuffer.copy(jpeg), w.toDouble(), h.toDouble())
-  }
-
-  internal val wantsFrames: Boolean get() = engine.isActive || thumbnailer.isEnabled
-
-  /** Analyzer thread; the caller closes the image afterwards. */
-  internal fun process(image: ImageProxy, rotation: Int) {
-    thumbnailer.offer(image, rotation)
-    engine.process(image, rotation)
   }
 
   override fun start(config: LiveStreamConfig) {

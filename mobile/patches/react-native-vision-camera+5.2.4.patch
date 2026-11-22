@@ -1,5 +1,53 @@
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/HybridCameraFactory.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/HybridCameraFactory.kt
+index c67339c..3ad2d48 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/HybridCameraFactory.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/HybridCameraFactory.kt
+@@ -77,7 +77,7 @@ class VisionCamera : HybridCameraFactorySpec() {
+       val device =
+         device as? NativeCameraDevice
+           ?: throw Error("The given `device` was not of type `NativeCameraDevice`!")
+-      val config = ConstraintResolver.resolveConstraints(device.cameraInfo, outputConfigurations, constraints)
++      val config = ConstraintResolver.resolveConstraints(device.cameraInfo, outputConfigurations, constraints, device.physicalCameraId)
+       return@async HybridCameraSessionConfig(config.sessionConfig, config.resolvedConfig)
+     }
+   }
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraInfo+utils.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraInfo+utils.kt
+index d75f186..645380c 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraInfo+utils.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraInfo+utils.kt
+@@ -23,6 +23,18 @@ val CameraCharacteristics.focalLength: Float?
+     return focalLengths?.firstOrNull()
+   }
+ 
++/**
++ * [Tally patch] Focal length in 35 mm film format (36 mm wide), which is what `CameraDevice.focalLength`
++ * promises (and iOS returns). Raw focal lengths can't be compared across sensors of different sizes.
++ */
++val CameraCharacteristics.focalLength35mm: Float?
++  get() {
++    val focal = focalLength ?: return null
++    val width = this[CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE]?.width ?: return focal
++    if (width <= 0f) return focal
++    return focal * 36f / width
++  }
++
+ val CameraCharacteristics.supportsDistortionCorrection: Boolean
+   get() {
+     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraSessionConnection+getCameraInfo.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraSessionConnection+getCameraInfo.kt
+index 34058b4..c951c3f 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraSessionConnection+getCameraInfo.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/extensions/CameraSessionConnection+getCameraInfo.kt
+@@ -22,3 +22,7 @@ fun CameraSessionConnection.getCameraInfo(provider: ProcessCameraProvider): Came
+     )
+   return cameraInfo
+ }
++
++/** [Tally patch] The physical lens to stream from, when the connection's device is one (else null). */
++val CameraSessionConnection.physicalCameraId: String?
++  get() = input.match({ (it as? NativeCameraDevice)?.physicalCameraId }, { null })
 diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt
-index 337601a..aa80142 100644
+index 337601a..4bc39d9 100644
 --- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt
 +++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraController.kt
 @@ -42,6 +42,9 @@ class HybridCameraController(
@@ -39,7 +87,25 @@ index 337601a..aa80142 100644
      }
    }
  
-@@ -282,77 +287,72 @@ class HybridCameraController(
+@@ -208,6 +213,9 @@ class HybridCameraController(
+ 
+   override fun setTorchMode(mode: TorchMode): Promise<Unit> {
+     return Promise.async {
++      // [Tally patch] A camera without a flash unit (front, ultra-wide) throws "No flash unit" even for OFF, e.g.
++      // when a lens switch lands before JS re-reads the device's caps. There is no torch to change: no-op.
++      if (!camera.cameraInfo.hasFlashUnit()) return@async
+       when (mode) {
+         TorchMode.OFF -> {
+           camera.cameraControl
+@@ -225,6 +233,7 @@ class HybridCameraController(
+ 
+   override fun enableTorchWithStrength(strength: Double): Promise<Unit> {
+     return Promise.async {
++      if (!camera.cameraInfo.hasFlashUnit()) return@async // [Tally patch] see setTorchMode
+       camera.cameraControl
+         .setTorchStrengthLevel(strength.toInt())
+         .await()
+@@ -282,77 +291,72 @@ class HybridCameraController(
      return Promise.resolved()
    }
  
@@ -151,6 +217,71 @@ index 337601a..aa80142 100644
 +    return Promise.async { manual.lockCurrentWhiteBalance().await() }
    }
  }
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraSession.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraSession.kt
+index ab21e76..097dc8f 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraSession.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/HybridCameraSession.kt
+@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
+ import android.util.Log
+ import androidx.annotation.UiThread
+ import androidx.camera.core.Camera
++import androidx.camera.core.CameraSelector
+ import androidx.camera.core.ConcurrentCamera
+ import androidx.camera.core.UseCaseGroup
+ import androidx.camera.lifecycle.ProcessCameraProvider
+@@ -17,6 +18,7 @@ import com.margelo.nitro.camera.HybridCameraSessionSpec
+ import com.margelo.nitro.camera.InterruptionReason
+ import com.margelo.nitro.camera.ListenerSubscription
+ import com.margelo.nitro.camera.extensions.getCameraInfo
++import com.margelo.nitro.camera.extensions.physicalCameraId
+ import com.margelo.nitro.camera.extensions.mapToArray
+ import com.margelo.nitro.camera.public.NativeCameraOutput
+ import com.margelo.nitro.camera.session.ActiveCameraSession
+@@ -78,8 +80,21 @@ class HybridCameraSession(
+           val connection = connections.single()
+           val cameraInfo = connection.getCameraInfo(cameraProvider)
+           val outputConfigurations = connection.outputs
+-          val config = ConstraintResolver.resolveConstraints(cameraInfo, outputConfigurations, connection.constraints)
+-          Log.i(TAG, "Binding use-cases: ${config.sessionConfig.useCases}")
++          // [Tally patch] a physical lens binds its parent logical camera, with every stream on that lens
++          val physicalCameraId = connection.physicalCameraId
++          val config =
++            ConstraintResolver.resolveConstraints(cameraInfo, outputConfigurations, connection.constraints, physicalCameraId)
++          val selector =
++            if (physicalCameraId != null) {
++              CameraSelector.Builder.fromSelector(cameraInfo.cameraSelector).setPhysicalCameraId(physicalCameraId).build()
++            } else {
++              cameraInfo.cameraSelector
++            }
++          Log.i(
++            TAG,
++            "Binding use-cases: ${config.sessionConfig.useCases}, effects: ${config.sessionConfig.effects}" +
++              (physicalCameraId?.let { " (physical camera $it)" } ?: ""),
++          )
+ 
+           if (connection.onSessionConfigSelected != null) {
+             // Notify JS callback that we resolved the constraints to a specific `config`
+@@ -87,7 +102,7 @@ class HybridCameraSession(
+             connection.onSessionConfigSelected(hybridConfig)
+           }
+ 
+-          val camera = cameraProvider.bindToLifecycle(lifecycleOwner, cameraInfo.cameraSelector, config.sessionConfig)
++          val camera = cameraProvider.bindToLifecycle(lifecycleOwner, selector, config.sessionConfig)
+           // Notify outputs that their use-cases are now attached to the Camera
+           config.preparedUseCases.forEach { it.notifyAttached() }
+           activeSession = ActiveCameraSessionSingle(camera, this)
+@@ -113,7 +128,10 @@ class HybridCameraSession(
+               val preparedUseCases = outputs.map { it.createUseCase(it.mirrorMode, outputConfig) }
+               allPreparedUseCases.addAll(preparedUseCases)
+               val useCaseGroup = UseCaseGroup.Builder()
+-              preparedUseCases.forEach { useCaseGroup.addUseCase(it.useCase) }
++              preparedUseCases.forEach { prepared ->
++                prepared.useCase?.let { useCaseGroup.addUseCase(it) }
++                prepared.effect?.let { useCaseGroup.addEffect(it) }
++              }
+               ConcurrentCamera.SingleCameraConfig(
+                 cameraInfo.cameraSelector,
+                 useCaseGroup.build(),
 diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/ManualCamera2Controls.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/ManualCamera2Controls.kt
 new file mode 100644
 index 0000000..b4dc25c
@@ -640,10 +771,38 @@ index 0000000..b4dc25c
 +  }
 +}
 diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt
-index a00188f..ea6e952 100644
+index a00188f..d81b031 100644
 --- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt
 +++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridCameraDevice.kt
-@@ -125,16 +125,23 @@ class HybridCameraDevice(
+@@ -30,7 +30,7 @@ import com.margelo.nitro.camera.extensions.contains
+ import com.margelo.nitro.camera.extensions.converters.from
+ import com.margelo.nitro.camera.extensions.converters.toSize
+ import com.margelo.nitro.camera.extensions.deviceType
+-import com.margelo.nitro.camera.extensions.focalLength
++import com.margelo.nitro.camera.extensions.focalLength35mm
+ import com.margelo.nitro.camera.extensions.getDefaultSimulatedAperture
+ import com.margelo.nitro.camera.extensions.getDepthSizes
+ import com.margelo.nitro.camera.extensions.getPhotoSizes
+@@ -98,7 +98,8 @@ class HybridCameraDevice(
+     get() = cameraInfo.position
+ 
+   override val physicalDevices: Array<HybridCameraDeviceSpec> by lazy {
+-    cameraInfo.physicalCameraInfos.mapToArray { HybridPhysicalCameraDevice(it) }
++    // [Tally patch] physical lenses know their logical parent, so they can be bound (see HybridPhysicalCameraDevice)
++    cameraInfo.physicalCameraInfos.mapToArray { HybridPhysicalCameraDevice(it, cameraInfo) }
+   }
+ 
+   override val isVirtualDevice: Boolean
+@@ -107,7 +108,7 @@ class HybridCameraDevice(
+     get() = cameraCharacteristics?.getPixelFormats() ?: emptyArray()
+ 
+   override val focalLength: Double?
+-    get() = cameraCharacteristics?.focalLength?.toDouble()
++    get() = cameraCharacteristics?.focalLength35mm?.toDouble() // [Tally patch] 35 mm-equivalent, as documented
+ 
+   override val lensAperture: Double
+     get() = cameraCharacteristics?.getDefaultSimulatedAperture() ?: 0.0
+@@ -125,16 +126,23 @@ class HybridCameraDevice(
    override val supportsWhiteBalanceMetering: Boolean
      get() = cameraInfo.isFocusMeteringSupported(createDummyMeteringAction(FocusMeteringAction.FLAG_AWB))
  
@@ -672,3 +831,454 @@ index a00188f..ea6e952 100644
  
    override val supportsExposureBias: Boolean
      get() = cameraInfo.exposureState.isExposureCompensationSupported
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridPhysicalCameraDevice.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridPhysicalCameraDevice.kt
+index ef1d9b7..3c69138 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridPhysicalCameraDevice.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/inputs/HybridPhysicalCameraDevice.kt
+@@ -1,6 +1,7 @@
+ package com.margelo.nitro.camera.hybrids.inputs
+ 
+ import android.annotation.SuppressLint
++import android.hardware.camera2.CameraCharacteristics
+ import android.os.Build
+ import androidx.camera.core.CameraInfo
+ import com.margelo.nitro.camera.CameraPosition
+@@ -17,107 +18,173 @@ import com.margelo.nitro.camera.Size
+ import com.margelo.nitro.camera.TargetStabilizationMode
+ import com.margelo.nitro.camera.extensions.cameraCharacteristicsOrNull
+ import com.margelo.nitro.camera.extensions.cameraIdOrNull
+-import com.margelo.nitro.camera.extensions.contains
+-import com.margelo.nitro.camera.extensions.deviceType
+-import com.margelo.nitro.camera.extensions.focalLength
++import com.margelo.nitro.camera.extensions.converters.toSize
++import com.margelo.nitro.camera.extensions.focalLength35mm
+ import com.margelo.nitro.camera.extensions.getDefaultSimulatedAperture
+-import com.margelo.nitro.camera.extensions.localizedName
+-import com.margelo.nitro.camera.extensions.position
++import com.margelo.nitro.camera.extensions.getDepthSizes
++import com.margelo.nitro.camera.extensions.getPhotoSizes
++import com.margelo.nitro.camera.extensions.getStreamSizes
++import com.margelo.nitro.camera.extensions.getVideoSizes
++import com.margelo.nitro.camera.extensions.mapToArray
+ import com.margelo.nitro.camera.public.NativeCameraDevice
+ 
+ /**
+- * Holds a [CameraInfo] ([androidx.camera.camera2.adapter.PhysicalCameraInfoAdapter]) to expose
+- * information about this physical part of a virtual [CameraInfo].
++ * [Tally patch] A physical lens (e.g. the telephoto) of a logical multi-camera, bindable on its own.
+  *
+- * This type has less available information than the combined [CameraInfo].
++ * CameraX can't bind a physical [CameraInfo] directly, so [cameraInfo] is the **parent** logical camera:
++ * the session binds the parent and routes every stream to [physicalCameraId], and constraints (FPS, HDR,
++ * stabilization) are resolved against the parent, as CameraX does internally. Lens-specific facts (zoom
++ * range, focal length, resolutions) come from the physical sensor's own [CameraCharacteristics].
+  */
+ @SuppressLint("RestrictedApi")
+ class HybridPhysicalCameraDevice(
+-  override val cameraInfo: CameraInfo,
++  private val physicalInfo: CameraInfo,
++  parentInfo: CameraInfo,
+ ) : HybridCameraDeviceSpec(),
+   NativeCameraDevice {
+-  private val cameraCharacteristics = cameraInfo.cameraCharacteristicsOrNull
++  private val parent = HybridCameraDevice(parentInfo)
++  private val characteristics: CameraCharacteristics? = physicalInfo.cameraCharacteristicsOrNull
++
++  override val cameraInfo: CameraInfo = parentInfo
++  override val physicalCameraId: String? = physicalInfo.cameraIdOrNull
+ 
+   override val id: String
+-    get() = cameraInfo.cameraIdOrNull ?: ""
++    get() = physicalCameraId ?: parent.id
+ 
+   override val modelID: String
+     get() = "physical:$position:$id"
+ 
+   override val localizedName: String
+-    get() = cameraInfo.localizedName
++    get() =
++      when (type) {
++        DeviceType.ULTRA_WIDE_ANGLE -> "Ultra Wide Camera"
++        DeviceType.TELEPHOTO -> "Telephoto Camera"
++        else -> "Wide Camera"
++      }
+ 
+   override val manufacturer: String
+     get() = Build.MANUFACTURER
+ 
++  // Field of view relative to the parent's default (main) lens, from 35 mm-equivalent focal lengths.
+   override val type: DeviceType
+-    get() = cameraInfo.deviceType
++    get() {
++      val mine = focalLength ?: return DeviceType.UNKNOWN
++      val main = parent.focalLength ?: return DeviceType.UNKNOWN
++      val ratio = mine / main
++      return when {
++        ratio < 0.8 -> DeviceType.ULTRA_WIDE_ANGLE
++        ratio > 1.4 -> DeviceType.TELEPHOTO
++        else -> DeviceType.WIDE_ANGLE
++      }
++    }
+ 
+   override val position: CameraPosition
+-    get() = cameraInfo.position
++    get() = parent.position
+ 
+   override val physicalDevices: Array<HybridCameraDeviceSpec> = emptyArray()
+   override val isVirtualDevice: Boolean = false
+-  override val supportedPixelFormats: Array<PixelFormat> = emptyArray()
+-  override val supportsPhotoHDR: Boolean = false
+-  override val supportedVideoDynamicRanges: Array<DynamicRange> = emptyArray()
+-  override val supportedFPSRanges: Array<Range> = emptyArray()
++  override val supportedPixelFormats: Array<PixelFormat>
++    get() = parent.supportedPixelFormats
++  override val supportsPhotoHDR: Boolean
++    get() = parent.supportsPhotoHDR
++  override val supportedVideoDynamicRanges: Array<DynamicRange>
++    get() = parent.supportedVideoDynamicRanges
++  override val supportedFPSRanges: Array<Range>
++    get() = parent.supportedFPSRanges
+   override val focalLength: Double?
+-    get() = cameraCharacteristics?.focalLength?.toDouble()
++    get() = characteristics?.focalLength35mm?.toDouble()
+   override val lensAperture: Double
+-    get() = cameraCharacteristics?.getDefaultSimulatedAperture() ?: 0.0
++    get() = characteristics?.getDefaultSimulatedAperture() ?: 0.0
+ 
+-  // TODO: CameraX should expose more information on PhysicalCameraInfoAdapter, as this info
+-  //       is available in Camera2. See https://issuetracker.google.com/issues/496096527.
+   override val isContinuityCamera: Boolean = false
+   override val companionDeskViewCamera: HybridCameraDeviceSpec? = null
+-  override val supportsFocusMetering: Boolean = false
+-  override val supportsFocusLocking: Boolean = false
+-  override val supportsSmoothAutoFocus: Boolean = false
+-  override val supportsExposureMetering: Boolean = false
+-  override val supportsPreviewImage: Boolean = false
+-  override val supportsSpeedQualityPrioritization: Boolean = false
+-  override val supportsExposureBias: Boolean = false
+-  override val minExposureBias: Double = 0.0
+-  override val maxExposureBias: Double = 0.0
+-  override val supportsExposureLocking: Boolean = false
+-  override val supportsWhiteBalanceMetering: Boolean = false
+-  override val supportsWhiteBalanceLocking: Boolean = false
+-  override val maxWhiteBalanceGain: Double = 0.0
+-  override val hasFlash: Boolean = false
+-  override val hasTorch: Boolean = false
+-  override val supportsTorchStrength: Boolean = false
+-  override val minTorchStrength: Double = 0.0
+-  override val maxTorchStrength: Double = 0.0
+-  override val supportsLowLightBoost: Boolean = false
+-  override val minZoom: Double = 0.0
+-  override val maxZoom: Double = 0.0
++  override val supportsFocusMetering: Boolean
++    get() = parent.supportsFocusMetering
++  override val supportsFocusLocking: Boolean
++    get() = parent.supportsFocusLocking
++  override val supportsSmoothAutoFocus: Boolean
++    get() = parent.supportsSmoothAutoFocus
++  override val supportsExposureMetering: Boolean
++    get() = parent.supportsExposureMetering
++  override val supportsPreviewImage: Boolean
++    get() = parent.supportsPreviewImage
++  override val supportsSpeedQualityPrioritization: Boolean
++    get() = parent.supportsSpeedQualityPrioritization
++  override val supportsExposureBias: Boolean
++    get() = parent.supportsExposureBias
++  override val minExposureBias: Double
++    get() = parent.minExposureBias
++  override val maxExposureBias: Double
++    get() = parent.maxExposureBias
++  override val supportsExposureLocking: Boolean
++    get() = parent.supportsExposureLocking
++  override val supportsWhiteBalanceMetering: Boolean
++    get() = parent.supportsWhiteBalanceMetering
++  override val supportsWhiteBalanceLocking: Boolean
++    get() = parent.supportsWhiteBalanceLocking
++  override val maxWhiteBalanceGain: Double
++    get() = parent.maxWhiteBalanceGain
++  override val hasFlash: Boolean
++    get() = parent.hasFlash
++  override val hasTorch: Boolean
++    get() = parent.hasTorch
++  override val supportsTorchStrength: Boolean
++    get() = parent.supportsTorchStrength
++  override val minTorchStrength: Double
++    get() = parent.minTorchStrength
++  override val maxTorchStrength: Double
++    get() = parent.maxTorchStrength
++  override val supportsLowLightBoost: Boolean
++    get() = parent.supportsLowLightBoost
++
++  // The physical sensor's own zoom range: 1× is this lens' native field of view.
++  override val minZoom: Double
++    get() = zoomRange?.lower?.toDouble() ?: 1.0
++  override val maxZoom: Double
++    get() = zoomRange?.upper?.toDouble() ?: 1.0
+   override val zoomLensSwitchFactors: DoubleArray = doubleArrayOf()
+-  override val supportsDistortionCorrection: Boolean = false
+-
++  override val supportsDistortionCorrection: Boolean
++    get() = parent.supportsDistortionCorrection
++
++  private val zoomRange: android.util.Range<Float>?
++    get() {
++      val c = characteristics ?: return null
++      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++        c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)?.let { return android.util.Range(maxOf(1f, it.lower), it.upper) }
++      }
++      val maxDigital = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: return null
++      return android.util.Range(1f, maxOf(1f, maxDigital))
++    }
++
++  // Physical streams must use the physical sensor's own stream sizes; fall back to the parent's.
+   override fun getSupportedResolutions(outputStreamType: OutputStreamType): Array<Size> {
+-    return emptyArray()
++    val c = characteristics
++    if (c?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) == null) {
++      return parent.getSupportedResolutions(outputStreamType)
++    }
++    val sizes =
++      when (outputStreamType) {
++        OutputStreamType.PHOTO -> c.getPhotoSizes()
++        OutputStreamType.VIDEO -> c.getVideoSizes()
++        OutputStreamType.STREAM -> c.getStreamSizes()
++        OutputStreamType.DEPTH_PHOTO, OutputStreamType.DEPTH_STREAM -> c.getDepthSizes()
++      }
++    if (sizes.isEmpty()) return parent.getSupportedResolutions(outputStreamType)
++    return sizes.mapToArray { it.toSize() }
+   }
+ 
+-  override fun supportsOutput(output: HybridCameraOutputSpec): Boolean {
+-    return false
+-  }
++  override fun supportsOutput(output: HybridCameraOutputSpec): Boolean = parent.supportsOutput(output)
+ 
+-  override fun supportsFPS(fps: Double): Boolean {
+-    return supportedFPSRanges.any { it.contains(fps) }
+-  }
++  override fun supportsFPS(fps: Double): Boolean = parent.supportsFPS(fps)
+ 
+-  override fun supportsVideoStabilizationMode(videoStabilizationMode: TargetStabilizationMode): Boolean {
+-    return false
+-  }
++  override fun supportsVideoStabilizationMode(videoStabilizationMode: TargetStabilizationMode): Boolean =
++    parent.supportsVideoStabilizationMode(videoStabilizationMode)
+ 
+-  override fun supportsPreviewStabilizationMode(previewStabilizationMode: TargetStabilizationMode): Boolean {
+-    return false
+-  }
++  override fun supportsPreviewStabilizationMode(previewStabilizationMode: TargetStabilizationMode): Boolean =
++    parent.supportsPreviewStabilizationMode(previewStabilizationMode)
+ 
+-  override fun isSessionConfigSupported(config: HybridCameraSessionConfigSpec): Boolean {
+-    return false
+-  }
++  override fun isSessionConfigSupported(config: HybridCameraSessionConfigSpec): Boolean = parent.isSessionConfigSupported(config)
+ 
+-  override val mediaTypes: Array<MediaType> = emptyArray()
++  override val mediaTypes: Array<MediaType>
++    get() = parent.mediaTypes
+ }
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridPreviewOutput.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridPreviewOutput.kt
+index 7960056..2de5c41 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridPreviewOutput.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridPreviewOutput.kt
+@@ -1,6 +1,9 @@
+ package com.margelo.nitro.camera.hybrids.outputs
+ 
+ import androidx.camera.core.Preview
++import androidx.camera.core.resolutionselector.AspectRatioStrategy
++import androidx.camera.core.resolutionselector.ResolutionSelector
++import androidx.camera.core.resolutionselector.ResolutionStrategy
+ import com.margelo.nitro.camera.CameraOrientation
+ import com.margelo.nitro.camera.HybridCameraPreviewOutputSpec
+ import com.margelo.nitro.camera.MediaType
+@@ -11,6 +14,7 @@ import com.margelo.nitro.camera.extensions.converters.fromMirrorMode
+ import com.margelo.nitro.camera.extensions.converters.toMirrorMode
+ import com.margelo.nitro.camera.extensions.converters.toSize
+ import com.margelo.nitro.camera.public.NativeCameraOutput
++import com.margelo.nitro.camera.public.applyPhysicalCamera
+ import com.margelo.nitro.camera.public.NativePreviewOutput
+ 
+ class HybridPreviewOutput :
+@@ -58,6 +62,19 @@ class HybridPreviewOutput :
+           // isMirrored={...}
+           setMirrorMode(mirrorMode.toMirrorMode())
+ 
++          // [Tally patch] 16:9 like the recording (CameraX defaults Preview to 4:3), at up to 1080p, so the
++          // preview frames what is recorded and a live-stream effect on this stream gets full-HD 16:9 input.
++          setResolutionSelector(
++            ResolutionSelector
++              .Builder()
++              .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
++              .setResolutionStrategy(
++                ResolutionStrategy(android.util.Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER),
++              ).build(),
++          )
++          // [Tally patch] stream from a physical lens when one is selected
++          applyPhysicalCamera(config)
++
+           // stabilizationMode={...}
+           when (config.previewStabilizationMode) {
+             TargetStabilizationMode.OFF -> {
+@@ -66,6 +83,14 @@ class HybridPreviewOutput :
+             }
+             null, TargetStabilizationMode.AUTO -> {
+               // Unspecified - might be enabled, might be disabled.
++              // [Tally patch] ...unless video stabilization is explicitly on: then prefer the camera's
++              // PREVIEW_STABILIZATION mode, which stabilizes preview (and anything drawn from it, e.g. a live
++              // feed effect) and video identically. Plain video EIS often stabilizes only the recorded stream,
++              // so the preview just crops in and still shakes. The resolver drops it again if unsupported.
++              val video = config.videoStabilizationMode
++              if (video != null && video != TargetStabilizationMode.OFF && video != TargetStabilizationMode.AUTO) {
++                setPreviewStabilizationEnabled(true)
++              }
+             }
+             else -> {
+               // Stabilization is explicitly enabled, no matter if it's `STANDARD`, `CINEMATIC`, etc - Android only knows "ON".
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridVideoOutput.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridVideoOutput.kt
+index c65d44f..7ab9e6d 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridVideoOutput.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/hybrids/outputs/HybridVideoOutput.kt
+@@ -27,6 +27,7 @@ import com.margelo.nitro.camera.extensions.surfaceRotation
+ import com.margelo.nitro.camera.extensions.toQualitySelector
+ import com.margelo.nitro.camera.hybrids.recording.HybridVideoRecorder
+ import com.margelo.nitro.camera.public.NativeCameraOutput
++import com.margelo.nitro.camera.public.applyPhysicalCamera
+ import com.margelo.nitro.camera.public.NativeLocation
+ import com.margelo.nitro.core.Promise
+ import com.margelo.nitro.core.resolved
+@@ -104,6 +105,8 @@ class HybridVideoOutput(
+           setMirrorMode(mirrorMode.toMirrorMode())
+           // orientation from previous value
+           setTargetRotation(outputOrientation.surfaceRotation)
++          // [Tally patch] record from a physical lens when one is selected
++          applyPhysicalCamera(config)
+ 
+           // Set the Dynamic Range (HDR, SDR, 10-bit, Dolby, ...)
+           val dynamicRange = config.videoDynamicRange?.toDynamicRange()
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraDevice.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraDevice.kt
+index 056f06a..05f46ed 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraDevice.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraDevice.kt
+@@ -4,4 +4,11 @@ import androidx.camera.core.CameraInfo
+ 
+ public interface NativeCameraDevice {
+   val cameraInfo: CameraInfo
++
++  /**
++   * [Tally patch] For a physical lens of a logical multi-camera: its Camera2 id. [cameraInfo] is then the
++   * parent logical camera, which is what CameraX binds and resolves constraints against.
++   */
++  val physicalCameraId: String?
++    get() = null
+ }
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraOutput.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraOutput.kt
+index d2d5e0b..58046ba 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraOutput.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/public/NativeCameraOutput.kt
+@@ -1,6 +1,9 @@
+ package com.margelo.nitro.camera.public
+ 
++import android.os.Build
+ import android.util.Range
++import androidx.camera.camera2.interop.camera2Interop
++import androidx.camera.core.CameraEffect
+ import androidx.camera.core.UseCase
+ import com.margelo.nitro.camera.MirrorMode
+ import com.margelo.nitro.camera.TargetDynamicRange
+@@ -17,6 +20,9 @@ interface NativeCameraOutput {
+     val videoStabilizationMode: TargetStabilizationMode?,
+     val videoDynamicRange: TargetDynamicRange?,
+     val photoHDR: Boolean?,
++    // [Tally patch] Set when the connection's device is a physical lens of a logical multi-camera:
++    // every stream of the session then comes from that physical sensor (see [applyPhysicalCamera]).
++    val physicalCameraId: String? = null,
+   )
+ 
+   /**
+@@ -32,9 +38,14 @@ interface NativeCameraOutput {
+    * output know it can start using the live [UseCase].
+    */
+   class PreparedUseCase(
+-    val useCase: UseCase,
++    // [Tally patch] An output may contribute only a [CameraEffect] (e.g. a GPU processor on the
++    // Preview stream) and no [UseCase] of its own.
++    val useCase: UseCase?,
++    val effect: CameraEffect?,
+     private val onAttached: () -> Unit,
+   ) {
++    constructor(useCase: UseCase, onAttached: () -> Unit) : this(useCase, null, onAttached)
++
+     /** Notify the output that this [UseCase] has been attached to the Camera. */
+     fun notifyAttached() = onAttached()
+   }
+@@ -63,3 +74,14 @@ interface NativeCameraOutput {
+     config: Config,
+   ): PreparedUseCase
+ }
++
++/**
++ * [Tally patch] Routes this use case's stream to [NativeCameraOutput.Config.physicalCameraId].
++ * CameraX 1.7 ignores `CameraSelector.setPhysicalCameraId` for single-camera binds; the per-use-case
++ * Camera2 option is applied to every stream of the session (`physicalCameraIdForAllStreams`).
++ */
++fun <B : UseCase.InteropConfigurable<B>> B.applyPhysicalCamera(config: NativeCameraOutput.Config): B {
++  val id = config.physicalCameraId ?: return this
++  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return this
++  return camera2Interop { setPhysicalCameraId(id) }
++}
+diff --git a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/session/ConstraintResolver.kt b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/session/ConstraintResolver.kt
+index 2431cd8..1cc1cbd 100644
+--- a/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/session/ConstraintResolver.kt
++++ b/node_modules/react-native-vision-camera/android/src/main/java/com/margelo/nitro/camera/session/ConstraintResolver.kt
+@@ -46,6 +46,8 @@ object ConstraintResolver {
+     cameraInfo: CameraInfo,
+     outputConfigurations: Array<CameraOutputConfiguration>,
+     constraints: Array<Constraint>,
++    // [Tally patch] physical lens of `cameraInfo` (a logical multi-camera) to stream from, if any
++    physicalCameraId: String? = null,
+   ): CameraSessionConfig {
+     // Separate FPS from other constraints — FPS is resolved after features.
+     val fpsConstraint = constraints.firstNotNullOfOrNull { it.asType<FPSConstraint>() }
+@@ -58,7 +60,7 @@ object ConstraintResolver {
+     // Pass 1: Resolve features (stab, HDR, etc.) via isSessionConfigSupported.
+     // SessionConfig is built WITHOUT FPS — FPS ranges depend on the resolved features.
+     while (true) {
+-      val config = activeConstraints.toConfig()
++      val config = activeConstraints.toConfig().copy(physicalCameraId = physicalCameraId)
+       val preparedUseCases =
+         outputConfigurations.map { outputConfiguration ->
+           val output =
+@@ -66,9 +68,12 @@ object ConstraintResolver {
+               ?: throw Error("The given `output` (${outputConfiguration.output}) is not of type `NativeCameraOutput`!")
+           return@map output.createUseCase(outputConfiguration.mirrorMode, config)
+         }
++      // [Tally patch] outputs may contribute only an effect (no use case); effects join the final config.
++      val useCases = preparedUseCases.mapNotNull { it.useCase }
++      val effects = preparedUseCases.mapNotNull { it.effect }
+       val sessionConfig =
+         SessionConfig
+-          .Builder(preparedUseCases.map { it.useCase })
++          .Builder(useCases)
+           .build()
+ 
+       if (cameraInfo.isSessionConfigSupported(sessionConfig) || activeConstraints.isEmpty()) {
+@@ -76,11 +81,13 @@ object ConstraintResolver {
+         val resolvedFPSRange = fpsConstraint?.resolveFPSRange(cameraInfo, sessionConfig)
+         val finalConfig = config.copy(fpsRange = resolvedFPSRange)
+         val finalSessionConfig =
+-          if (resolvedFPSRange != null) {
++          if (resolvedFPSRange != null || effects.isNotEmpty()) {
+             SessionConfig
+-              .Builder(preparedUseCases.map { it.useCase })
+-              .apply { setFrameRateRange(resolvedFPSRange) }
+-              .build()
++              .Builder(useCases)
++              .apply {
++                if (resolvedFPSRange != null) setFrameRateRange(resolvedFPSRange)
++                effects.forEach { addEffect(it) }
++              }.build()
+           } else {
+             sessionConfig
+           }

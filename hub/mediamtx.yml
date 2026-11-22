@@ -56,7 +56,8 @@ webrtcTrackGatherTimeout: 2s
 
 srt: true
 srtAddress: :8890
-# Wi-Fi retransmission window. Raise to 200ms on a busy network; lower to 80ms on a clean 5 GHz one.
+# Floor for the Wi-Fi retransmission window. Each phone asks for ~4x its measured round trip (120-250 ms);
+# a 120 ms floor keeps Wi-Fi retransmits in time; the larger of the two sides wins.
 srtMinLatency: 120ms
 
 pathDefaults:

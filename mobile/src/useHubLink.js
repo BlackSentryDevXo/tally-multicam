@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Alert, Platform } from 'react-native';
 import { File, UploadType } from 'expo-file-system';
 import { Asset } from 'expo-media-library';
-import { computeOffset } from '../clock';
+import { computeOffset, srtLatency } from '../clock';
 import { clipName, clipsDir, fileUri, jobIsForHub, sentDir, sessionFromClip } from './config';
 import { candidates } from './pairing';
 
@@ -62,7 +62,8 @@ export function useHubLink({ cfgRef, commit, handlers }) {
     return true;
   };
   const sendBinary = (buf) => ws.current?.readyState === 1 && ws.current.send(buf);
-  const report = (message) => { const m = String(message).slice(0, 500); console.warn(m); send({ t: 'error', message: m }); };
+  // First line only: native errors carry a Java/Swift stack trace that means nothing on the hub.
+  const report = (message) => { const m = String(message).split('\n')[0].replace(/\s+at \S+\(r8-map-id.*$/, '').slice(0, 300); console.warn(m); send({ t: 'error', message: m }); };
   const pushStatus = () => handlers.current.getStatus().then(send).catch(() => {});
 
   // Copy finished clips to the hub, oldest first. A clip leaves the queue only after the hub confirms it, and is
@@ -297,6 +298,7 @@ export function useHubLink({ cfgRef, commit, handlers }) {
     report,
     pushStatus,
     enqueue,
+    srtLatency: () => srtLatency(samples.current),
     reconnect: () => actions.current.attempt?.(),
     takeEnded: () => {
       if (rejected.current) rejectNow();

@@ -1,6 +1,6 @@
 {
   "name": "tally-hub",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Tally Hub: one-button synced recording and live feeds for every camera",
   "main": "main.js",
   "scripts": {

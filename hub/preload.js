@@ -2,9 +2,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 // Only these channels exist for the page. Anything else is refused here, before it reaches the main process.
 const CALLS = new Set([
-  'close', 'copy', 'firewall', 'firewallFix', 'firewallSettings', 'focus', 'forget', 'init', 'live', 'lock', 'mains',
-  'obs', 'obsAddCameras', 'openFolder', 'openLog', 'pairing', 'preview', 'record', 'rlog', 'session', 'settings',
-  'smooth', 'stop', 'whep', 'whepEnd',
+  'close', 'copy', 'firewall', 'firewallFix', 'firewallSettings', 'focus', 'forget', 'framing', 'init', 'inspect',
+  'live', 'liveQuality', 'lock', 'mains', 'manual', 'obs', 'obsAddCameras', 'openFolder', 'openLog', 'pairing',
+  'portraitGuide', 'preview', 'record', 'rlog', 'session', 'settings', 'smooth', 'stop', 'whep', 'whepEnd',
   '__test', // dev-only: the main process registers it only in an unpackaged build started with TALLY_TEST
 ]);
 const EVENTS = new Set([

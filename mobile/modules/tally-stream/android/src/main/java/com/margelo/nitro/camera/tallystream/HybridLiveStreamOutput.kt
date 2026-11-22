@@ -1,80 +1,69 @@
 package com.margelo.nitro.camera.tallystream
 
-import android.util.Size
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.annotation.Keep
+import com.facebook.proguard.annotations.DoNotStrip
+
+import android.util.Log
+import androidx.camera.core.CameraEffect
+import androidx.core.util.Consumer
 import com.margelo.nitro.camera.CameraOrientation
 import com.margelo.nitro.camera.HybridCameraOutputSpec
 import com.margelo.nitro.camera.MediaType
 import com.margelo.nitro.camera.MirrorMode
-import com.margelo.nitro.camera.extensions.converters.toSize
-import com.margelo.nitro.camera.extensions.surfaceRotation
+import com.margelo.nitro.camera.TargetColorSpace
+import com.margelo.nitro.camera.TargetDynamicRangeBitDepth
 import com.margelo.nitro.camera.public.NativeCameraOutput
-import java.util.concurrent.Executors
 
 /**
- * VisionCamera v5 custom CameraOutput backed by a CameraX ImageAnalysis (YUV_420_888) use case.
- * CameraX binds at most one use case of each type and VisionCamera already uses Preview +
- * VideoCapture, so ImageAnalysis is the slot left; CameraX stream-sharing handles devices that
- * can't run three streams natively.
+ * VisionCamera v5 custom CameraOutput that adds no stream of its own: it contributes a CameraX [CameraEffect]
+ * on the Preview stream only (never VideoCapture, so a GL problem can't reach a recording). Its [GlRenderer]
+ * passes preview frames through and also draws them into the live encoder and the thumbnail reader.
+ * (The patched VisionCamera session adds output effects to the SessionConfig.)
  */
+// Looked up by name from C++ (JNI): R8 must not rename or strip it in release builds.
+@Keep
+@DoNotStrip
 class HybridLiveStreamOutput(
   private val streamer: HybridLiveStreamer,
-  targetWidth: Double,
-  targetHeight: Double,
+  @Suppress("UNUSED_PARAMETER") targetWidth: Double,
+  @Suppress("UNUSED_PARAMETER") targetHeight: Double,
 ) : HybridCameraOutputSpec(),
-  NativeCameraOutput,
-  ImageAnalysis.Analyzer {
+  NativeCameraOutput {
+  private val renderer = GlRenderer(streamer)
+  private val effect: CameraEffect = PreviewEffect(renderer)
+
   override val mediaType: MediaType = MediaType.VIDEO
   override var outputOrientation: CameraOrientation = CameraOrientation.UP
     set(value) {
+      if (value != field) Log.i("TallyLiveStream", "Output orientation: $value")
       field = value
-      imageAnalysis?.targetRotation = value.surfaceRotation
+      renderer.orientation = value
     }
   override val currentResolution: com.margelo.nitro.camera.Size?
-    get() = imageAnalysis?.resolutionInfo?.resolution?.toSize()
+    get() = renderer.feedSize?.let { com.margelo.nitro.camera.Size(it.width.toDouble(), it.height.toDouble()) }
   override val mirrorMode: MirrorMode = MirrorMode.AUTO
-
-  private var imageAnalysis: ImageAnalysis? = null
-  private val executor = Executors.newSingleThreadExecutor()
-  // Analysis resolutions are sensor-oriented (landscape).
-  private val target = Size(maxOf(targetWidth, targetHeight).toInt(), minOf(targetWidth, targetHeight).toInt())
 
   override fun createUseCase(
     mirrorMode: MirrorMode,
     config: NativeCameraOutput.Config,
   ): NativeCameraOutput.PreparedUseCase {
-    val selector = ResolutionSelector.Builder()
-      .setResolutionStrategy(ResolutionStrategy(target, ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
-      .build()
-    val analysis = ImageAnalysis.Builder()
-      .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-      .setOutputImageRotationEnabled(false) // we rotate while copying (cheaper than CameraX's extra pass)
-      .setResolutionSelector(selector)
-      .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-      .setTargetRotation(outputOrientation.surfaceRotation)
-      .build()
-    return NativeCameraOutput.PreparedUseCase(analysis) {
-      imageAnalysis = analysis
-      analysis.setAnalyzer(executor, this)
-    }
-  }
-
-  override fun analyze(image: ImageProxy) {
-    try {
-      if (streamer.wantsFrames) streamer.process(image, image.imageInfo.rotationDegrees)
-    } catch (_: Throwable) {
-      // Never let a streaming/thumbnail problem propagate into the camera pipeline.
-    } finally {
-      image.close()
+    // A 10-bit HDR preview can't go through this 8-bit GL path; leave the session untouched instead.
+    val range = config.videoDynamicRange
+    val hdr = range != null && (
+      range.bitDepth == TargetDynamicRangeBitDepth.HDR_10_BIT ||
+        range.colorSpace == TargetColorSpace.HLG_BT2020 ||
+        range.colorSpace == TargetColorSpace.DOLBY_VISION
+      )
+    return NativeCameraOutput.PreparedUseCase(null, if (hdr) null else effect) {
+      streamer.engine.setSourceIssue(if (hdr) "Live feed and previews are off while recording HDR on Android" else null)
     }
   }
 
   override fun dispose() {
     super.dispose()
-    imageAnalysis?.clearAnalyzer()
-    executor.shutdown()
+    renderer.release()
   }
+
+  private class PreviewEffect(renderer: GlRenderer) :
+    CameraEffect(CameraEffect.PREVIEW, renderer.executor, renderer, Consumer { e -> Log.e("TallyLiveStream", "Preview effect error", e) })
 }

@@ -33,9 +33,10 @@ const STOP_CONFIRM_MS = 8000; // a stop the recorder never confirms is retried, 
 const MAX_FRAME_BYTES = 1_000_000; // never send the hub a preview bigger than this
 // Hub preview thumbnails. Defaults until the hub sends {t:'preview', fps, maxWidth}; the caps always apply.
 const PREVIEW_W = 640;
-const PREVIEW_FPS = { max: 15, connected: 12, recording: 6, dimmed: 2, histogramOnly: 3 };
+const PREVIEW_FPS = { max: 15, connected: 12, recording: 6, dimmed: 2, hot: 2, histogramOnly: 3 };
 const HIST_MIN_MS = 334; // histogram never faster than 3 Hz
 const MANUAL_KEYS = ['focus', 'iso', 'shutter', 'wbTemp'];
+const WB_RANGE = [2500, 8000]; // Kelvin, same span as the Pro panel's ruler
 const RESTART_KEYS = ['lens', 'res', 'fps', 'hdr', 'stabilization', 'codec'];
 
 export function CameraScreen({ cfg, update, hasMic }) {
@@ -81,7 +82,10 @@ export function CameraScreen({ cfg, update, hasMic }) {
   if (pinned && (take.current || (device && pinned.id === device.id))) device = pinned;
   deviceRef.current = device ?? null;
   const [codecs, setCodecs] = useState([]);
-  const caps = useFormatSupport(device, device ? cfg.learned?.[device.id] : null, codecs);
+  const rawCaps = useFormatSupport(device, device ? cfg.learned?.[device.id] : null, codecs);
+  // A zoom-based lens (Android tele) works in its own units: 1× = the device at `base` zoom.
+  const base = lens?.base ?? 1;
+  const caps = useMemo(() => (rawCaps && base !== 1 ? { ...rawCaps, zoom: { min: 1, max: rawCaps.zoom.max / base } } : rawCaps), [rawCaps, base]);
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const lensesRef = useRef(lenses);
@@ -106,6 +110,9 @@ export function CameraScreen({ cfg, update, hasMic }) {
   const [zoomHud, setZoomHud] = useState(false);
   const [manual, setManualState] = useState({});
   const manualRef = useRef({});
+  const [inspected, setInspected] = useState(false); // the hub's inspector is open on this camera
+  const inspectRef = useRef(false);
+  inspectRef.current = inspected;
   const [micBusy, setMicBusy] = useState(false); // meter paused so the recorder can take the mic (old Android)
 
   const video = useVideoOutput({
@@ -117,21 +124,17 @@ export function CameraScreen({ cfg, update, hasMic }) {
   const videoRef = useRef(video);
   videoRef.current = video;
   // Live feed (react-native-tally-stream). Latched so a new object each render can't churn effects.
-  // iOS: its output is always attached (live feed + hub thumbnails).
-  // Android: it's CameraX ImageAnalysis, which can break 4K recording binding, so it's attached ONLY while
-  // a live feed is requested, never changed mid-take, and Android thumbnails stay on takeSnapshot.
+  // Always attached (live feed + hub thumbnails). On Android it adds no camera stream: it's a GPU effect on
+  // the preview stream only, so it can't affect recording binding and starting/stopping a feed never
+  // reconfigures the camera.
   const stream = useStreamSource();
   const liveRef = useRef(null);
   if (stream.live && !liveRef.current) liveRef.current = stream.live;
   const live = liveRef.current;
   const thumbsRef = useRef(null);
-  if (Platform.OS === 'ios' && stream.thumbs && !thumbsRef.current) thumbsRef.current = stream.thumbs;
-  const [liveAttached, setLiveAttached] = useState(false); // Android only
-  const liveAttachedRef = useRef(false);
-  liveAttachedRef.current = liveAttached;
+  if (stream.thumbs && !thumbsRef.current) thumbsRef.current = stream.thumbs;
   const streamOut = live?.output ?? stream.output ?? null;
-  const attachLive = !!streamOut && (Platform.OS === 'ios' || liveAttached);
-  const outputs = useMemo(() => (attachLive ? [video, streamOut] : [video]), [video, streamOut, attachLive]);
+  const outputs = useMemo(() => (streamOut ? [video, streamOut] : [video]), [video, streamOut]);
 
   const hdrOk = !!caps?.hdr, stabOk = !!caps?.stabilization;
   const constraints = useMemo(() => {
@@ -166,14 +169,41 @@ export function CameraScreen({ cfg, update, hasMic }) {
       session: hubTake ? t.session : '', // lets the hub stop a phone still running a previous take
       duration: t?.recording ? t.recorder?.recordedDuration ?? 0 : 0,
       settings: pickHub(settingsRef.current),
+      locked: aeLockedRef.current, // AE/AF(/WB) lock, so the hub's switch shows the truth
       lenses: lensesRef.current.map((l) => l.id),
+      lensX: Object.fromEntries(lensesRef.current.map((l) => [l.id, l.factor])), // so the hub labels tele "3×", "5×"
       remainingSec: Math.round(Paths.availableDiskSpace / (bitrate(settingsRef.current) / 8)),
       thermal: th ?? thermalRef.current ?? null,
       preview: previewState.current, // 'ok' | 'unavailable': lets the hub explain a missing preview
       stream: liveStats(),
       orientation: orientationRef.current, // 'portrait' | 'landscape-left' (top of phone left) | 'landscape-right'
       platform: Platform.OS,
+      manual: Object.fromEntries(MANUAL_KEYS.concat('wbTint').map((k) => [k, manualRef.current[k] ?? null])), // null = auto
+      ranges: manualRanges(),
+      auto: inspectRef.current ? autoReadout() : null, // only while the hub's inspector is open on this camera
     };
+  }
+  // What manual 3A this lens allows, from caps and the live controller (null = not available).
+  function manualRanges() {
+    const k = capsRef.current, c = ctrl();
+    const r = { iso: null, shutter: null, wbTemp: null, wbTint: null, focus: !!k?.manualFocus };
+    try {
+      if (k?.manualExposure && c && c.minISO > 0 && c.maxISO > c.minISO && c.minExposureDuration > 0) {
+        r.iso = [Math.round(c.minISO), Math.round(c.maxISO)];
+        // Video can't expose longer than one frame.
+        r.shutter = [c.minExposureDuration, Math.min(c.maxExposureDuration || 1, 1 / settingsRef.current.fps)];
+      }
+    } catch {}
+    if (k?.manualWB) { r.wbTemp = [WB_RANGE[0], WB_RANGE[1]]; r.wbTint = [-100, 100]; }
+    return r;
+  }
+  // The same values the Pro strip's useLiveReadout samples: what auto exposure / focus are doing right now.
+  function autoReadout() {
+    const c = ctrl();
+    if (!c) return null;
+    try {
+      return { iso: c.iso > 0 ? Math.round(c.iso) : null, shutter: c.exposureDuration > 0 ? c.exposureDuration : null, focus: Number.isFinite(c.lensPosition) ? c.lensPosition : null };
+    } catch { return null; }
   }
   const orientationRef = useRef('portrait');
   orientationRef.current = orientation;
@@ -181,7 +211,7 @@ export function CameraScreen({ cfg, update, hasMic }) {
   handlers.current = {
     onMessage, getStatus, isBusy: () => !!take.current, onForget: () => setSheet(null),
     // The hub closed this camera: stop publishing to it (Android detach waits for the take, as always).
-    onClose: () => { if (live && (liveCfg.current || deferredLive.current)) applyStream({ on: false }); },
+    onClose: () => { if (live && liveCfg.current) applyStream({ on: false }); },
   };
   const link = useHubLink({ cfgRef, commit, handlers });
   const linkRef = useRef(link);
@@ -195,7 +225,15 @@ export function CameraScreen({ cfg, update, hasMic }) {
     if (!link.online) return;
     const t = setTimeout(() => link.pushStatus(), 300);
     return () => clearTimeout(t);
-  }, [settings, lens?.id, link.online, orientation]);
+  }, [settings, lens?.id, link.online, orientation, aeLocked, manual, inspected]);
+
+  // Hub inspector open on this camera: status (with the auto ISO/shutter/focus readout) at 1 Hz instead of 0.5 Hz.
+  useEffect(() => {
+    if (!link.online) { setInspected(false); return; }
+    if (!inspected) return;
+    const t = setInterval(() => linkRef.current.pushStatus(), 1000);
+    return () => clearInterval(t);
+  }, [inspected, link.online]);
 
   // HUD: battery, storage, heat — also while offline. Warn once when the phone gets hot.
   // State only changes when a shown value changes, so this never re-renders the screen for nothing.
@@ -327,11 +365,13 @@ export function CameraScreen({ cfg, update, hasMic }) {
       say(`${RES_LABEL[s.res]} · ${s.fps} isn’t supported here.`, { tone: 'warn' });
     }
     if (s.hdr && config.selectedVideoDynamicRange && config.selectedVideoDynamicRange.bitDepth !== 'hdr-10-bit') {
-      say(`HDR isn’t available at ${RES_LABEL[s.res]} · ${s.fps}. Recording SDR.`, { tone: 'warn' });
+      const msg = `HDR isn’t available at ${RES_LABEL[s.res]} · ${s.fps}. Recording SDR.`;
+      say(msg, { tone: 'warn' }); report(msg);
       patch({ hdr: false });
     }
     if (s.stabilization && config.selectedVideoStabilizationMode === 'off') {
-      say('Stabilization isn’t available with this format.', { tone: 'warn' });
+      const msg = `Stabilization isn’t available at ${RES_LABEL[s.res]} · ${s.fps}.`;
+      say(msg, { tone: 'warn' }); report(msg);
       patch({ stabilization: false });
     }
   }
@@ -366,8 +406,6 @@ export function CameraScreen({ cfg, update, hasMic }) {
     }
     t.resolve();
     linkRef.current.takeEnded();
-    const d = deferredLive.current; // Android live-feed change that had to wait for the take to end
-    if (d) { deferredLive.current = null; setTimeout(() => applyStream(d), 0); }
   }
   function saveClip(t, path) {
     if (t.saved || !path) return;
@@ -536,6 +574,10 @@ export function CameraScreen({ cfg, update, hasMic }) {
         focusAt(hubPointToView(clamp(+m.x, 0, 1), clamp(+m.y, 0, 1)), false);
       } else if (m.t === 'lock') {
         await lockAll(!!m.on);
+      } else if (m.t === 'manual') {
+        manualFromHub(m);
+      } else if (m.t === 'inspect') {
+        setInspected(!!m.on);
       } else if (m.t === 'stream') {
         applyStream(m);
       } else if (m.t === 'preview') {
@@ -604,6 +646,33 @@ export function CameraScreen({ cfg, update, hasMic }) {
     await focusAt(reticle ?? { x: layout.current.width / 2, y: layout.current.height / 2 }, true);
   }
 
+  // Hub inspector: {iso, shutter, wbTemp, wbTint, focus}; only keys present apply, null = back to auto.
+  // Values are clamped to this lens's ranges; anything this lens can't do is refused with a one-line reason.
+  function manualFromHub(m) {
+    const r = manualRanges();
+    const p = {}, errs = [];
+    const pick = (key, ok, why, lo, hi) => {
+      if (!(key in m)) return;
+      const v = m[key];
+      if (v === null) { p[key] = null; return; }
+      if (typeof v !== 'number' || !Number.isFinite(v)) { errs.push(`${key} must be a number`); return; }
+      if (!ok) { errs.push(why); return; }
+      p[key] = clamp(v, lo, hi);
+    };
+    pick('focus', r.focus, 'this lens has no manual focus', 0, 1);
+    pick('iso', !!r.iso, 'this lens has no manual ISO', ...(r.iso || [0, 0]));
+    pick('shutter', !!r.shutter, 'this lens has no manual shutter', ...(r.shutter || [0, 0]));
+    pick('wbTemp', !!r.wbTemp, 'this lens has no manual white balance', ...(r.wbTemp || [0, 0]));
+    pick('wbTint', !!r.wbTint, 'this lens has no manual white balance', ...(r.wbTint || [0, 0]));
+    if (p.iso != null) p.iso = Math.round(p.iso);
+    if (p.wbTemp != null) p.wbTemp = Math.round(p.wbTemp);
+    if (p.wbTint != null) p.wbTint = Math.round(p.wbTint);
+    if (p.wbTemp === null && !('wbTint' in p)) p.wbTint = 0; // like the Pro panel's "A": auto WB drops the tint too
+    const changed = Object.keys(p).some((k) => (manualRef.current[k] ?? null) !== p[k]);
+    if (changed) setManual(p);
+    if (errs.length) report([...new Set(errs)].join('; '));
+  }
+
   // Manual 3A. Calls are coalesced: slider drags only ever apply the latest value.
   const applying = useRef(false);
   const pendingApply = useRef(null);
@@ -622,7 +691,7 @@ export function CameraScreen({ cfg, update, hasMic }) {
     while (pendingApply.current) {
       const job = pendingApply.current;
       pendingApply.current = null;
-      try { await applyManual(job.prev, job.next, job.force); } catch (e) { say(`Manual control: ${e.message}`, { tone: 'warn' }); }
+      try { await applyManual(job.prev, job.next, job.force); } catch (e) { say(`Manual control: ${e.message}`, { tone: 'warn' }); report(`manual control: ${e.message}`); }
     }
     applying.current = false;
   }
@@ -747,16 +816,17 @@ export function CameraScreen({ cfg, update, hasMic }) {
     patch({ fps: list[(list.indexOf(settings.fps) + 1) % list.length] });
   }
 
-  // ---------- recording saver: dim UI + screen while recording, wake on touch ----------
+  // ---------- saver: dim UI + screen while recording or live to OBS, wake on touch ----------
   const [dimmed, setDimmed] = useState(false);
   const dimmedRef = useRef(false);
   dimmedRef.current = dimmed;
   const idleTimer = useRef();
   const savedBrightness = useRef(null);
+  const onAirRef = useRef(false); // live to OBS; set below, where the live state lives
   function poke() {
     if (dimmedRef.current) setDimmed(false);
     clearTimeout(idleTimer.current);
-    if (take.current && settingsRef.current.recSaver) idleTimer.current = setTimeout(() => setDimmed(true), SAVER_IDLE_MS);
+    if ((take.current || onAirRef.current) && settingsRef.current.recSaver) idleTimer.current = setTimeout(() => setDimmed(true), SAVER_IDLE_MS);
   }
   async function restoreBrightness() {
     const b = savedBrightness.current;
@@ -768,10 +838,6 @@ export function CameraScreen({ cfg, update, hasMic }) {
     } catch {}
   }
   const hot = (thermal?.level ?? 0) >= 2;
-  useEffect(() => {
-    if (rec && settings.recSaver) poke();
-    else { clearTimeout(idleTimer.current); setDimmed(false); }
-  }, [rec, settings.recSaver]);
   useEffect(() => {
     if (!dimmed) { restoreBrightness(); return; }
     (async () => {
@@ -837,9 +903,10 @@ export function CameraScreen({ cfg, update, hasMic }) {
     let fps = hubPreview ? clamp(+hubPreview.fps || 0, 0, PREVIEW_FPS.max) : PREVIEW_FPS.connected;
     if (dimmed) fps = Math.min(fps, PREVIEW_FPS.dimmed);
     else if (rec) fps = Math.min(fps, PREVIEW_FPS.recording);
+    if (hot) fps = Math.min(fps, PREVIEW_FPS.hot); // heat: every thumbnail is a scale + JPEG + Wi-Fi send
     if (!fps && histVisible) fps = PREVIEW_FPS.histogramOnly;
     return { fps, width };
-  }, [hubPreview, appActive, link.online, dimmed, rec, histVisible]);
+  }, [hubPreview, appActive, link.online, dimmed, rec, histVisible, hot]);
   const planRef = useRef(plan);
   planRef.current = plan;
 
@@ -936,9 +1003,14 @@ export function CameraScreen({ cfg, update, hasMic }) {
   // role 'live': on air to OBS (red LIVE pill). role 'monitor': the hub's smooth preview feed (subtle HUB badge).
   const liveCfg = useRef(null); // the config currently requested (null = off)
   const stepped = useRef(false); // thermal step-down applied
-  const deferredLive = useRef(null);
   const [liveState, setLiveState] = useState('off');
   const [liveRole, setLiveRole] = useState('live');
+  const onAir = liveRole === 'live' && (liveState === 'live' || liveState === 'connecting'); // not the hub's monitor feed
+  onAirRef.current = onAir;
+  useEffect(() => {
+    if ((rec || onAir) && settings.recSaver) poke();
+    else { clearTimeout(idleTimer.current); setDimmed(false); }
+  }, [rec, onAir, settings.recSaver]);
   function liveStats() {
     if (!live) return null;
     try {
@@ -946,7 +1018,7 @@ export function CameraScreen({ cfg, update, hasMic }) {
       return { state: st.state, width: st.width, height: st.height, fps: st.fps, kbps: st.kbps, droppedFrames: st.droppedFrames, error: st.error ?? null };
     } catch { return null; }
   }
-  const withLatency = (url) => (/[?&]latency=/.test(url) ? url : `${url}${url.includes('?') ? '&' : '?'}latency=120`);
+  const withLatency = (url) => (/[?&]latency=/.test(url) ? url : `${url}${url.includes('?') ? '&' : '?'}latency=${linkRef.current.srtLatency()}`);
 
   // Identity of a requested feed: the hub re-sends its stream message on every reconnect, and restarting an
   // identical feed would glitch what's on air. Compared before any thermal step-down.
@@ -963,22 +1035,9 @@ export function CameraScreen({ cfg, update, hasMic }) {
     const on = !!m.on;
     if (!on) {
       // Stopping the encoder never touches the camera's outputs, so it happens now, even mid-take.
-      // Android: only detaching the output (a camera reconfigure) waits for the take to end.
-      deferredLive.current = null;
       stopLive();
-      if (Platform.OS === 'android') {
-        if (!take.current) setLiveAttached(false);
-        else if (liveAttachedRef.current) deferredLive.current = { on: false };
-      }
       return;
     }
-    // Android: attaching the output reconfigures the camera, which must never happen mid-take.
-    if (Platform.OS === 'android' && take.current && !liveAttachedRef.current) {
-      deferredLive.current = m;
-      report('Live feed changes apply after this take (Android)');
-      return;
-    }
-    deferredLive.current = null; // applied directly: an older deferred change must not undo it later
     const url = String(m.url || '');
     if (!/^srt:\/\//.test(url)) return report('live feed: invalid stream URL');
     const lvl = thermalRef.current?.level ?? 0;
@@ -994,15 +1053,31 @@ export function CameraScreen({ cfg, update, hasMic }) {
       profile: ['baseline', 'main', 'high'].includes(m.profile) ? m.profile : 'main', // passed through to the encoder
     };
     const role = m.role === 'monitor' ? 'monitor' : 'live';
-    const reqKey = JSON.stringify([cfgL.url, cfgL.width, cfgL.height, cfgL.fps, cfgL.bitrateKbps, cfgL.profile, role]);
+    const req = [cfgL.url, cfgL.width, cfgL.height, cfgL.fps, cfgL.bitrateKbps, cfgL.profile, role];
+    const reqKey = JSON.stringify(req);
     const cur = liveStats()?.state;
-    if (reqKey === liveReqKey.current && (cur === 'live' || cur === 'connecting')) return; // already running exactly this
+    const running = cur === 'live' || cur === 'connecting';
+    if (reqKey === liveReqKey.current && running) return; // already running exactly this
+    // Only the bitrate changed (the hub's Standard/High/Max): retune the running encoder, no restart, so
+    // what's on air never drops out. Both encoders take a live bitrate (VideoToolbox, MediaCodec).
+    const prev = liveReqKey.current ? JSON.parse(liveReqKey.current) : null;
+    if (running && liveCfg.current && prev?.length === req.length && prev.every((v, i) => i === 4 || v === req[i])) {
+      liveReqKey.current = reqKey;
+      stepped.current = lvl >= 2; // same rule as a fresh "on": full quality again only if the phone has cooled
+      const fps = stepped.current ? Math.min(cfgL.fps, 30) : cfgL.fps;
+      const kbps = stepped.current ? Math.min(cfgL.bitrateKbps, 4000) : cfgL.bitrateKbps;
+      try {
+        if (fps !== liveCfg.current.fps) live.setFps(fps);
+        live.setBitrate(kbps);
+        liveCfg.current = { ...liveCfg.current, fps, bitrateKbps: kbps };
+        return;
+      } catch (e) { report(`live bitrate: ${e.message}`); } // fall through to a restart
+    }
     liveReqKey.current = reqKey;
     stepped.current = false; // a fresh "on" from the hub restores full quality (if the phone has cooled)
     if (lvl >= 2) { cfgL.fps = Math.min(cfgL.fps, 30); cfgL.bitrateKbps = Math.min(cfgL.bitrateKbps, 4000); stepped.current = true; }
     liveCfg.current = cfgL;
     setLiveRole(role);
-    if (Platform.OS === 'android') setLiveAttached(true);
     try { live.start(cfgL); } catch (e) { report(`live start: ${e.message}`); say(`Live feed: ${e.message}`, { tone: 'warn' }); }
   }
 
@@ -1028,7 +1103,6 @@ export function CameraScreen({ cfg, update, hasMic }) {
       stopLive();
       report('live feed stopped: phone is critically hot (recording continues)');
       say('Live feed stopped to protect the recording: phone is too hot.', { tone: 'warn', ms: 5000 });
-      if (Platform.OS === 'android') { if (take.current) deferredLive.current = { on: false }; else setLiveAttached(false); }
     } else if (lvl >= 2 && !stepped.current) {
       stepped.current = true;
       try { live.setFps(Math.min(30, cfgL.fps)); live.setBitrate(Math.min(4000, cfgL.bitrateKbps)); } catch {}
@@ -1115,7 +1189,7 @@ export function CameraScreen({ cfg, update, hasMic }) {
             key={l.id}
             onPress={() => (on ? patch({ zoom: 1 }) : pickLens(l.id))}
             accessibilityRole="button"
-            accessibilityLabel={`${l.id === 'ultra' ? 'Ultra wide' : l.id === 'tele' ? 'Telephoto' : 'Wide'} lens, ${fmtX(l.factor)} times`}
+            accessibilityLabel={l.digital ? `${fmtX(l.factor)} times digital zoom` : `${l.id === 'ultra' ? 'Ultra wide' : l.id === 'tele' ? 'Telephoto' : 'Wide'} lens, ${fmtX(l.factor)} times`}
             accessibilityState={{ selected: on }}
             hitSlop={4}
             style={[s.lensChip, on && s.lensChipOn]}
@@ -1184,15 +1258,19 @@ export function CameraScreen({ cfg, update, hasMic }) {
         isActive
         outputs={outputs}
         constraints={constraints}
-        zoom={zoom}
+        zoom={zoom * base}
         exposure={caps?.exposureBias ? settings.exposure : undefined}
-        torchMode={settings.torch && caps?.torch ? 'on' : 'off'}
+        torchMode={caps?.torch ? (settings.torch ? 'on' : 'off') : undefined} // Android throws "No flash unit" even for 'off'
         resizeMode="contain"
         allowBackgroundAudioPlayback
         onLayout={(e) => (layout.current = e.nativeEvent.layout)}
         onSessionConfigSelected={onSessionConfigSelected}
         onStarted={onStarted}
-        onError={(e) => { say(`Camera: ${e.message}`, { tone: 'warn' }); report(`camera: ${e.message}`); }}
+        onError={(e) => {
+          if (/not active/i.test(e.message)) return; // a control landed while the session restarts after a settings change: harmless
+          if (/Cancelled due to another zoom value being set/i.test(e.message)) return; // a newer zoom replaced it: harmless
+          say(`Camera: ${e.message.split('\n')[0]}`, { tone: 'warn' }); report(`camera: ${e.message}`);
+        }}
         onInterruptionStarted={(r) => say(r === 'video-device-not-available-due-to-system-pressure'
           ? 'Camera paused: the phone is too hot.' : `Camera interrupted (${r}).`, { tone: 'warn' })}
       />
@@ -1303,7 +1381,7 @@ export function CameraScreen({ cfg, update, hasMic }) {
 
           <Toast ref={toast} top={insets.top + (landscape ? 104 : 132)} />
 
-          {dimmed && <Saver insets={insets} since={recStartAt} hot={hot} showMeter={showMeter && meterEnabled} onWake={poke} />}
+          {dimmed && <Saver insets={insets} since={recStartAt} label={rec ? null : 'LIVE'} hot={hot} showMeter={showMeter && meterEnabled} onWake={poke} />}
         </RotContext.Provider>
       </Animated.View>
     </View>
@@ -1465,19 +1543,12 @@ function Timecode({ rec, since }) {
 }
 
 // Recording saver: near-black screen with only the essentials; fully black when the phone is hot.
-function Saver({ insets, since, hot, showMeter, onWake }) {
+function Saver({ insets, since, label, hot, showMeter, onWake }) {
   const o = useRef(new Animated.Value(0)).current;
   useEffect(() => { Animated.timing(o, { toValue: 1, duration: T.slow * 2, useNativeDriver: true }).start(); }, []);
-  const pulse = useRef(new Animated.Value(1)).current;
-  useEffect(() => {
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(pulse, { toValue: 0.25, duration: 800, useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 1, duration: 800, useNativeDriver: true }),
-    ]));
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const [, tick] = useState(0);
+  // The dot blinks on the 1 s tick below instead of a continuous pulse: a looping animation redraws the
+  // whole window 60×/s (UI + RenderThread), which is most of what this screen exists to save.
+  const [n, tick] = useState(0);
   useEffect(() => {
     if (hot) return;
     const t = setInterval(() => tick((n) => n + 1), 1000);
@@ -1486,12 +1557,12 @@ function Saver({ insets, since, hot, showMeter, onWake }) {
   return (
     <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: '#000', opacity: o }]}>
       <Pressable style={StyleSheet.absoluteFill} onPress={onWake}
-        accessibilityLabel="Recording. Screen dimmed to reduce heat. Tap to show controls.">
+        accessibilityLabel={`${label ? 'Live' : 'Recording'}. Screen dimmed to reduce heat. Tap to show controls.`}>
         {!hot && (
           <>
             <View style={[s.saverTop, { top: insets.top + SP.m, left: insets.left + SP.m }]}>
-              <Animated.View style={[s.saverDot, { opacity: pulse }]} />
-              <Text style={[s.saverTime, mono]} allowFontScaling={false}>{fmtDuration((Date.now() - since.current) / 1000)}</Text>
+              <View style={[s.saverDot, { opacity: n % 2 ? 0.3 : 1 }]} />
+              <Text style={[s.saverTime, mono]} allowFontScaling={false}>{label ?? fmtDuration((Date.now() - since.current) / 1000)}</Text>
             </View>
             {showMeter && (
               <View style={[s.saverMeter, { left: insets.left + SP.m, right: insets.right + SP.m, bottom: insets.bottom + SP.m }]}>

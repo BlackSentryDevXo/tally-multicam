@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Platform } from 'react-native';
 import { CommonResolutions, VisionCamera, useCameraDevices } from 'react-native-vision-camera';
 import { FPS_LIST, RES_LIST } from './config';
 
@@ -8,34 +9,75 @@ const round1 = (n) => Math.round(n * 10) / 10;
 /**
  * The phone's lenses as stock-camera style chips: ultra (0.5×), wide (1×), tele (2-5×), front.
  * Each lens is a physical device, so footage never jumps lenses mid-take the way a virtual multi-cam can.
- * Zoom factors are read from the virtual multi-cam's lens switch points (relative to the wide lens).
+ * iOS: zoom factors are read from the virtual multi-cam's lens switch points (relative to the wide lens).
+ * Android: see androidLenses().
  */
 export function useLenses() {
   const devices = useCameraDevices();
   return useMemo(() => {
-    const back = devices.filter((d) => d.position === 'back');
-    const physical = (type) => back.find((d) => !d.isVirtualDevice && d.type === type);
-    const wide = physical('wide-angle') ?? back.find((d) => !d.isVirtualDevice) ?? back[0];
-    const ultra = physical('ultra-wide-angle');
-    const tele = physical('telephoto');
     const front = devices.find((d) => d.position === 'front' && !d.isVirtualDevice) ?? devices.find((d) => d.position === 'front');
-
-    // The biggest virtual back camera knows where each lens kicks in, e.g. [2, 6] → ultra 0.5×, tele 3×.
-    const virt = back.filter((d) => d.isVirtualDevice).sort((a, b) => b.physicalDevices.length - a.physicalDevices.length)[0];
-    const f = [...(virt?.zoomLensSwitchFactors ?? [])].sort((a, b) => a - b);
-    const virtHasUltra = virt?.physicalDevices.some((d) => d.type === 'ultra-wide-angle');
-    const ultraX = virtHasUltra && f[0] > 1.01 ? round1(1 / f[0]) : 0.5;
-    let teleX = 2;
-    if (virtHasUltra && f.length >= 2) teleX = round1(f[f.length - 1] / f[0]);
-    else if (!virtHasUltra && f.length >= 1) teleX = round1(f[0]);
-
-    const list = [];
-    if (ultra) list.push({ id: 'ultra', device: ultra, factor: ultraX });
-    if (wide) list.push({ id: 'wide', device: wide, factor: 1 });
-    if (tele) list.push({ id: 'tele', device: tele, factor: teleX });
+    const list = Platform.OS === 'android' ? androidLenses(devices) : iosLenses(devices);
     if (front) list.push({ id: 'front', device: front, factor: 1 });
     return list;
   }, [devices]);
+}
+
+function iosLenses(devices) {
+  const back = devices.filter((d) => d.position === 'back');
+  const physical = (type) => back.find((d) => !d.isVirtualDevice && d.type === type);
+  const wide = physical('wide-angle') ?? back.find((d) => !d.isVirtualDevice) ?? back[0];
+  const ultra = physical('ultra-wide-angle');
+  const tele = physical('telephoto');
+
+  // The biggest virtual back camera knows where each lens kicks in, e.g. [2, 6] → ultra 0.5×, tele 3×.
+  const virt = back.filter((d) => d.isVirtualDevice).sort((a, b) => b.physicalDevices.length - a.physicalDevices.length)[0];
+  const f = [...(virt?.zoomLensSwitchFactors ?? [])].sort((a, b) => a - b);
+  const virtHasUltra = virt?.physicalDevices.some((d) => d.type === 'ultra-wide-angle');
+  const ultraX = virtHasUltra && f[0] > 1.01 ? round1(1 / f[0]) : 0.5;
+  let teleX = 2;
+  if (virtHasUltra && f.length >= 2) teleX = round1(f[f.length - 1] / f[0]);
+  else if (!virtHasUltra && f.length >= 1) teleX = round1(f[0]);
+
+  const list = [];
+  if (ultra) list.push({ id: 'ultra', device: ultra, factor: ultraX });
+  if (wide) list.push({ id: 'wide', device: wide, factor: 1 });
+  if (tele) list.push({ id: 'tele', device: tele, factor: teleX });
+  return list;
+}
+
+// 0.59 → 0.6, 2.9 → 3, 3.7 → 3.7: stock-camera style labels.
+export const lensLabelX = (r) => (r >= 1 && Math.abs(r - Math.round(r)) < 0.25 ? Math.round(r) : round1(r));
+
+/**
+ * Android hides most lenses inside the main logical back camera (Samsung: camera 0 = wide + ultra + tele), so
+ * the lenses are its physicalDevices plus any standalone back cameras (the same sensor listed twice keeps the
+ * standalone one). The patched VisionCamera binds a physical lens through its logical parent, and reports
+ * focalLength 35 mm-equivalent (focal ÷ sensor width), so the ratio to the main lens is the field-of-view ratio.
+ * Wide stays the logical camera itself (the phone's own tuning). Without a physical tele, a digital-zoom
+ * stand-in on the main camera is offered instead, flagged `digital` (labelled "zoom", not a lens).
+ */
+export function androidLenses(devices) {
+  const back = devices.filter((d) => d.position === 'back');
+  const main = back.filter((d) => d.isVirtualDevice).sort((a, b) => b.physicalDevices.length - a.physicalDevices.length)[0] ?? back[0];
+  if (!main) return [];
+  const seen = new Set();
+  const lenses = [];
+  for (const d of [...back.filter((d) => d !== main && !d.isVirtualDevice), ...(main.physicalDevices ?? [])]) {
+    if (d.id === main.id || seen.has(d.id)) continue;
+    seen.add(d.id);
+    const r = d.focalLength && main.focalLength ? d.focalLength / main.focalLength : null;
+    if (r) lenses.push({ device: d, r });
+  }
+  lenses.sort((a, b) => a.r - b.r);
+  const ultra = lenses.find((l) => l.r < 0.8);
+  const tele = lenses.find((l) => l.r > 1.4); // the shortest tele (e.g. 3× over 5×): the useful one for a room
+
+  const list = [];
+  if (ultra) list.push({ id: 'ultra', device: ultra.device, factor: lensLabelX(ultra.r) });
+  list.push({ id: 'wide', device: main, factor: 1 });
+  if (tele) list.push({ id: 'tele', device: tele.device, factor: lensLabelX(tele.r) });
+  else if (main.maxZoom >= 3) list.push({ id: 'tele', device: main, factor: 3, base: 3, digital: true });
+  return list;
 }
 
 const hasRes = (device, res) => {

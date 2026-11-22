@@ -37,7 +37,8 @@ started and stopped together, matched in settings, monitored for battery and hea
   copy is saved to each phone's gallery. Nothing is ever deleted from the phones.
 
 **Pro camera (Tally Cam)**
-- Lens chips (0.5×, 1×, telephoto, front), pinch to zoom.
+- Lens chips (0.5×, 1×, telephoto, front) that switch to the real physical sensor, including Android telephotos
+  that phones only expose inside their multi-camera (e.g. the Galaxy S24's 3×); pinch to zoom.
 - Tap to focus and expose; **double-tap or long-press for AE/AF lock**; drag to adjust exposure.
 - Manual focus, ISO, shutter and white balance with scrub rulers that only move on a deliberate sideways drag
   (iPhone, and Android phones that support manual sensor control, e.g. Galaxy S21).
@@ -50,10 +51,15 @@ started and stopped together, matched in settings, monitored for battery and hea
 - Dims the screen while recording to save heat and battery; tap to wake.
 
 **Live to OBS**
-- Each phone hardware-encodes H.264 and streams it over SRT to the hub: 720p30, 1080p30 or 1080p60
-  (25/50 fps for 50 Hz regions).
-- **Add to OBS** creates one Media Source per camera, a multiview scene, and a full-frame scene per camera,
-  ready to switch. Running it again updates instead of duplicating.
+- Each phone hardware-encodes H.264 straight from the camera (GPU on Android, VideoToolbox on iPhone) and streams
+  it over SRT to the hub: 720p30, 1080p30 or 1080p60 (25/50 fps for 50 Hz regions), at Standard, High or Max
+  bitrate (1080p60: 12 / 20 / 30 Mb/s), changeable live without restarting the feed.
+- **Add to OBS** creates one low-latency Browser Source per camera (WebRTC, the same path as the hub's tiles), a
+  multiview scene, and a full-frame scene per camera, ready to switch, plus a disabled colour-correction filter
+  ready for grading. Running it again updates instead of duplicating.
+- **Framing:** pan and zoom (100–300 %) where each camera's live picture sits, from a minimap in the hub. OBS
+  follows instantly; recordings stay full-frame for the edit.
+- **Portrait guide:** a 9:16 box over every preview, so one framing works for landscape and vertical cuts.
 - OBS start/stop recording follows the hub's REC button (via OBS's built-in WebSocket).
 
 **Monitoring**
@@ -61,7 +67,9 @@ started and stopped together, matched in settings, monitored for battery and hea
   snapshots as fallback.
 - Per-camera chips: battery, recording time left, temperature (Warm/Hot/Critical, °C on Android), audio meter.
 - Pre-record check warns about offline phones, low battery, low storage or hot phones.
-- Remote control per camera: lens, zoom, exposure, torch, tap-to-focus on the tile, AE/AF/WB lock.
+- Click a camera for its **settings panel**: lens, zoom, framing, format, focus (auto / manual position),
+  exposure (auto + bias / manual ISO + shutter), white balance (auto / Kelvin + tint), stabilization, HDR, torch,
+  AE/AF/WB lock, with live auto readouts. Click the selected tile again to focus there.
 
 **Reliability**
 - A phone that drops off Wi-Fi keeps recording and copies its clip when it's back.
@@ -93,7 +101,7 @@ flowchart LR
   A & B -- "SRT :8890<br/>H.264 monitor / live feeds" --> M
   A & B -- "HTTP upload<br/>finished clips" --> D
   M -- "WebRTC, localhost<br/>tile video" --> H
-  M -- "SRT, localhost<br/>Media Sources" --> O
+  M -- "WebRTC, localhost<br/>Browser Sources" --> O
   H -- "obs-websocket<br/>start/stop, Add to OBS" --> O
 ```
 
@@ -145,11 +153,12 @@ or paid): see [iPhone](#tally-cam-iphone-1). With a free account the app has to 
 3. **iPhone:** keep Tally Cam in the foreground (iOS stops the camera in the background). Guided Access helps.
 4. **Settings:** **Apply to all** for one format everywhere. In 50 Hz countries (Europe, Africa, most of Asia)
    use 25 or 50 fps to avoid flicker (Settings → Mains power).
-5. **Framing:** click a tile to focus there, then **Lock** AE/AF/WB so colour and brightness don't drift.
+5. **Framing:** click a tile to open its settings, click it again to focus there, then **Lock** AE/AF/WB so colour
+   and brightness don't drift. Turn on the **Portrait guide** if you'll also cut vertical clips.
 6. **Roll:** name the session and press **REC** (or **Space**). The beep at the start is your sync point.
 7. **Wrap:** press **STOP**. Each tile shows a progress bar, then ✓ copied.
 
-**Camera controls → Close camera** disconnects a phone for now (it reconnects when someone taps it on the phone);
+**Settings panel → Close camera** disconnects a phone for now (it reconnects when someone taps it on the phone);
 **Forget camera** makes the phone drop the pairing and return to its pairing screen.
 
 ## Live switching in OBS
@@ -157,11 +166,14 @@ or paid): see [iPhone](#tally-cam-iphone-1). With a free account the app has to 
 1. In OBS: **Tools → WebSocket Server Settings → Enable**, and copy the password.
 2. In Tally Hub: click **OBS**, tick the box, paste the password.
 3. Pick a quality under **LIVE**: 720p30, 1080p30 or 1080p60.
-4. Click **Add to OBS**. You get `Tally · <camera>` Media Sources, a **Tally Cameras** multiview scene, and a
+4. Click **Add to OBS**. You get `Tally · <camera>` Browser Sources, a **Tally Cameras** multiview scene, and a
    `Tally – <camera>` scene for each phone. Switch between them like any other scene.
+5. If a camera shows black in OBS: **OBS → Settings → Advanced → Sources →** untick **Browser Source Hardware
+   Acceleration**, then restart OBS.
 
 Each tile's **LIVE** badge shows the bitrate the hub receives, plus **OBS** once OBS is reading it. Expect a
-fraction of a second of delay on a good network. Three phones at 1080p60 need roughly 36 Mb/s of Wi-Fi; use 5 GHz.
+fraction of a second of delay on a good network (each phone sizes its SRT buffer from its measured round trip,
+120–250 ms). Three phones at 1080p60 Standard need roughly 36 Mb/s of Wi-Fi (Max: ~90 Mb/s); use 5 GHz.
 
 ## Editing
 

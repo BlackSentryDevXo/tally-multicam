@@ -3,13 +3,13 @@
 Tally Cam's live feed and hub thumbnails, as a VisionCamera v5 custom `CameraOutput`.
 The local 4K recording is untouched; this output only taps the same camera.
 
-- **Live feed:** hardware H.264 (profile baseline / main / high, default main), no B-frames, 1 s GOP, ~CBR, SPS/PPS repeated before every IDR, sent as MPEG-TS over **SRT as the caller**, to MediaMTX on the hub (`srt://hub:8890?streamid=publish:<cam>&latency=120`). OBS and the hub's WebRTC (WHEP) player then read each phone from MediaMTX.
+- **Live feed:** hardware H.264 (profile baseline / main / high, default main), no B-frames, 1 s GOP, rate-capped (iOS: VBR, peak 1.5× average over 1 s), SPS/PPS repeated before every IDR, sent as MPEG-TS over **SRT as the caller**, to MediaMTX on the hub (`srt://hub:8890?streamid=publish:<cam>&latency=120`). OBS and the hub's WebRTC (WHEP) player then read each phone from MediaMTX.
 - **Thumbnails:** JPEGs up to 15 fps from the same frames for the hub grid. They work with the stream on or off.
 
 | | iOS | Android |
 |---|---|---|
 | Camera tap | `AVCaptureVideoDataOutput`, NV12. Buffers are requested already downsized to the output's target (exact source aspect, orientation-aware; iOS 16+), falling back to preview-sized, then full-size buffers | CameraX `ImageAnalysis` (YUV_420_888); the slot VisionCamera leaves free |
-| Encoder | VideoToolbox low-latency rate control, profile keys with SPS verification, GPU scale/crop to the requested size | MediaCodec async, profile/level from the codec's advertised list (falls back to encoder defaults), CBR where supported, `KEY_LOW_LATENCY` on API 30+ |
+| Encoder | VideoToolbox real-time VBR (AverageBitRate + DataRateLimits 1.5×/1 s and 2×/0.2 s), MaximizePowerEfficiency, profile keys with SPS verification; camera buffers at the target size go straight in, anything else is scaled/cropped once on the GPU | MediaCodec async, profile/level from the codec's advertised list (falls back to encoder defaults), CBR where supported, `KEY_LOW_LATENCY` on API 30+ |
 | Mux + SRT | Own MPEG-TS muxer, then libsrt 1.5.7 (vendored static xcframework + OpenSSL-Universal) | RootEncoder `srt` 2.8.2 (pure Kotlin; MPEG-TS + SRT caller; prepends SPS/PPS to keyframes) |
 | Thumbnails | GPU downscale (VTPixelTransferSession), then the hardware JPEG encoder (VideoToolbox `jpeg`), ImageIO as fallback | Bulk-row subsample to NV21 (rotation on the small array), then `YuvImage.compressToJpeg` (libjpeg-turbo) |
 

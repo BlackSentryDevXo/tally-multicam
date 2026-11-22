@@ -34,11 +34,13 @@ const MTX_BIN = () => {
   return fs.existsSync(p) ? p : resource('bin', name); // older packages shipped a flat bin/mediamtx
 };
 // Live feed presets; the frame rate follows the mains frequency so lights don't flicker on camera.
+// kbps per live quality (cfg.liveQuality, global): the phone's thermal step-down still caps it when hot.
 const LIVE = {
-  720: { w: 1280, h: 720, fps: { 60: 30, 50: 25 }, kbps: 4000 },
-  1080: { w: 1920, h: 1080, fps: { 60: 30, 50: 25 }, kbps: 8000 },
-  '1080hfr': { w: 1920, h: 1080, fps: { 60: 60, 50: 50 }, kbps: 12000 },
+  720: { w: 1280, h: 720, fps: { 60: 30, 50: 25 }, kbps: { standard: 4000, high: 6000, max: 8000 } },
+  1080: { w: 1920, h: 1080, fps: { 60: 30, 50: 25 }, kbps: { standard: 8000, high: 12000, max: 16000 } },
+  '1080hfr': { w: 1920, h: 1080, fps: { 60: 60, 50: 50 }, kbps: { standard: 12000, high: 20000, max: 30000 } },
 };
+const QUALITIES = ['standard', 'high', 'max'];
 // Hub tile preview: a light monitor feed, hardware-encoded on the phone, played back as real video in the tile.
 const MONITOR = { w: 1280, h: 720, fps: { 60: 30, 50: 25 }, kbps: 2500 };
 const PROFILE = 'main'; // Chromium's WebRTC decoder is safe with Baseline/Main; OBS accepts anything
@@ -49,6 +51,7 @@ const cfgPath = () => path.join(app.getPath('userData'), 'config.json');
 const saveCfg = () => fs.writeFileSync(cfgPath(), JSON.stringify(cfg, null, 2));
 
 const phones = new Map(); // deviceId -> { ws, host, name, platform, status, preview }
+const inspecting = new Set(); // phones whose inspector is open in the hub (they send 1 Hz auto readouts)
 const state = { recording: false, session: '', startedAt: 0, nextSession: '' };
 const obs = new OBSWebSocket();
 let obsOk = false;
@@ -110,6 +113,110 @@ const READ_USER = 'hubread';
 const readPass = () => cfg.mtxReadPass;
 const mtxAuth = () => ({ authorization: `Basic ${Buffer.from(`${READ_USER}:${readPass()}`).toString('base64')}` });
 const obsReadUrl = (id) => `srt://127.0.0.1:${SRT_PORT}?streamid=read:${pathOf(id)}:${READ_USER}:${readPass()}`;
+const obsViewUrl = (id) => `http://127.0.0.1:${PORT}/obs/${pathOf(id)}?k=${cfg.obsToken}`;
+
+// OBS browser sources play each camera over WebRTC, the same route as the hub's tiles: no SRT receive buffer and
+// no FFmpeg demux/probe buffer, so OBS shows the camera about as fast as the hub does.
+const OBS_PAGE = `<!doctype html><meta charset="utf-8"><title>Tally camera</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}video{width:100%;height:100%;object-fit:contain;display:block;transition:transform .15s ease-out}
+#s{position:fixed;left:0;right:0;top:45%;text-align:center;font:600 28px -apple-system,system-ui,sans-serif;color:#888}</style>
+<video autoplay muted playsinline></video><div id="s">Waiting for camera…</div>
+<script>
+const v = document.querySelector('video');
+const whep = location.pathname + '/whep' + location.search;
+let pc = null, timer = null;
+function retry() { clearTimeout(timer); timer = setTimeout(start, 1000); }
+async function start() {
+  try { pc && pc.close(); } catch {}
+  pc = new RTCPeerConnection({ iceServers: [] });
+  const me = pc;
+  const tr = pc.addTransceiver('video', { direction: 'recvonly' });
+  try { tr.receiver.jitterBufferTarget = 0; } catch {} // play frames as soon as they arrive
+  pc.ontrack = (e) => { v.srcObject = new MediaStream([e.track]); v.play().catch(() => {}); };
+  pc.onconnectionstatechange = () => { if (me === pc && ['failed', 'disconnected', 'closed'].includes(pc.connectionState)) retry(); };
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise((r) => { if (pc.iceGatheringState === 'complete') return r(); pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 1500); });
+    const res = await fetch(whep, { method: 'POST', headers: { 'content-type': 'application/sdp' }, body: pc.localDescription.sdp });
+    if (res.status !== 201) throw new Error('feed not ready');
+    await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+  } catch { if (me === pc) retry(); }
+}
+// Stalled video (phone paused or reconnected): start over.
+let lastT = -1;
+setInterval(() => { if (v.currentTime === lastT && pc && pc.connectionState === 'connected') start(); lastT = v.currentTime; }, 5000);
+const st = document.getElementById('s');
+setInterval(() => {
+  const ok = v.readyState >= 2 && v.videoWidth > 0;
+  st.style.display = ok ? 'none' : 'block';
+  if (!ok) st.textContent = 'Waiting for camera… ' + (pc ? pc.connectionState : '') + (location.search.includes('debug') ? ' rs=' + v.readyState + ' t=' + v.currentTime.toFixed(1) + ' ' + v.videoWidth + 'x' + v.videoHeight : '');
+}, 500);
+start();
+// Framing: a digital pan + zoom of this camera, set in the hub's inspector. Pushed live (SSE), never reloads the page.
+function frame(f) {
+  const z = +f.zoom || 1, x = f.x ?? 0.5, y = f.y ?? 0.5;
+  v.style.transform = z === 1 ? '' : 'scale(' + z + ') translate(' + (0.5 - x) * 100 + '%,' + (0.5 - y) * 100 + '%)';
+}
+const fr = new EventSource(location.pathname + '/framing' + location.search);
+fr.onmessage = (e) => { try { frame(JSON.parse(e.data)); } catch {} };
+</script>`;
+function obsPage(req, res, u) {
+  const loopback = /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress || '');
+  const m = u.pathname.match(/^\/obs\/(cam-[\w-]+)(\/whep|\/framing)?$/);
+  const k = String(u.searchParams.get('k') || '');
+  const tokOk = k.length === cfg.obsToken.length && crypto.timingSafeEqual(Buffer.from(k), Buffer.from(cfg.obsToken));
+  if (!loopback || !m || !tokOk) return res.writeHead(404).end();
+  if (!m[2]) {
+    if (req.method !== 'GET') return res.writeHead(405).end();
+    return res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }).end(OBS_PAGE);
+  }
+  if (m[2] === '/framing') { // the camera's framing: JSON, or a live stream of it (SSE) for the OBS page
+    if (req.method !== 'GET') return res.writeHead(405).end();
+    const f = JSON.stringify(framingOf(idOfPath(m[1])));
+    if (!/text\/event-stream/.test(req.headers.accept || '')) return res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(f);
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+    res.write(`retry: 1000\ndata: ${f}\n\n`);
+    const subs = framingSubs.get(m[1]) || new Set();
+    framingSubs.set(m[1], subs.add(res));
+    req.on('close', () => subs.delete(res));
+    return;
+  }
+  if (req.method !== 'POST') return res.writeHead(405).end();
+  const chunks = [];
+  let size = 0;
+  req.on('data', (c) => { size += c.length; if (size > 64 * 1024) req.destroy(); else chunks.push(c); });
+  req.on('error', () => {});
+  req.on('end', async () => {
+    try {
+      const r = await fetch(whepUrl(m[1]), { method: 'POST', headers: { 'content-type': 'application/sdp', ...mtxAuth() }, body: Buffer.concat(chunks).toString(), signal: AbortSignal.timeout(8000) });
+      res.writeHead(r.status === 201 ? 201 : 503, { 'content-type': 'application/sdp' }).end(r.status === 201 ? await r.text() : '');
+    } catch { res.writeHead(503).end(); }
+  });
+}
+
+// ---------- framing: per-camera digital pan + zoom of the live view (OBS page + hub tile), never the recording ----------
+// zoom 1–3, x/y = normalised centre of the crop (kept inside the frame); portraitX = centre of the hub's 9:16 guide
+// within the framed picture. Stored in cfg.framing[id].
+const PORTRAIT_W = (9 / 16) / (16 / 9); // a full-height 9:16 box in a 16:9 picture
+const framingSubs = new Map(); // MediaMTX path -> open SSE responses (OBS pages)
+const idOfPath = (p) => [...new Set([...phones.keys(), ...Object.keys(cfg.framing || {})])].find((id) => pathOf(id) === p);
+function clampFraming(f = {}) {
+  const num = (v, d) => (Number.isFinite(+v) && v !== null && v !== '' ? +v : d);
+  const zoom = Math.min(3, Math.max(1, num(f.zoom, 1))), h = 0.5 / zoom, pw = PORTRAIT_W / 2;
+  const c = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  return { zoom, x: c(num(f.x, 0.5), h, 1 - h), y: c(num(f.y, 0.5), h, 1 - h), portraitX: c(num(f.portraitX, 0.5), pw, 1 - pw) };
+}
+const framingOf = (id) => clampFraming(id && cfg.framing?.[id]);
+let framingSave = null;
+function setFraming(id, f) {
+  const next = clampFraming({ ...framingOf(id), ...f });
+  cfg.framing = { ...cfg.framing, [id]: next };
+  clearTimeout(framingSave);
+  framingSave = setTimeout(saveCfg, 400); // drags send many updates; write the file once they settle
+  const data = `data: ${JSON.stringify(next)}\n\n`;
+  for (const res of framingSubs.get(pathOf(id)) || []) { try { res.write(data); } catch {} }
+  return next;
+}
 
 // Keep the computer awake while it matters: a take, a clip copying, or any camera connected.
 let powerId = null;
@@ -139,6 +246,16 @@ function networks() {
       .filter((i) => i.family === 'IPv4' && !i.internal && !i.address.startsWith('169.254.')) // self-assigned: phones can't reach it
       .map((i) => ({ dev, ip: i.address, name: label(dev) })))
     .sort((a, b) => score(a.dev, a.ip) - score(b.dev, b.ip));
+}
+
+// A phone that dialled the Bonjour name may arrive over IPv6 link-local (fe80::…%en0), which the SRT feed
+// can't use. Swap it for the IPv4 address on the same interface, else the best LAN address.
+function ipv4Of(addr) {
+  if (!addr.includes(':')) return addr;
+  const bare = addr.split('%')[0];
+  const ifs = os.networkInterfaces();
+  const dev = Object.keys(ifs).find((d) => (ifs[d] || []).some((i) => i.address.split('%')[0] === bare));
+  return (ifs[dev] || []).find((i) => i.family === 'IPv4' && !i.internal)?.address || networks()[0]?.ip || addr;
 }
 
 // Bonjour name first (survives DHCP address changes), then every LAN address. The phone tries them in order.
@@ -244,6 +361,7 @@ function claimName(part, dir, base, ext) {
 function handleUpload(req, res) {
   let u;
   try { u = new URL(req.url, 'http://x'); } catch { return res.writeHead(400).end(); } // e.g. "GET //": never throw on network input
+  if (u.pathname.startsWith('/obs/')) return obsPage(req, res, u);
   if (req.method !== 'POST' || u.pathname !== '/upload') return res.writeHead(404).end();
   if (!keyOk(u.searchParams.get('key'))) return res.writeHead(403).end();
 
@@ -337,7 +455,7 @@ function staleTake(st) {
 const HELLO_TIMEOUT_MS = 10000;
 function onPhone(ws, req) {
   let id = null;
-  const host = (req.socket.localAddress || '').replace(/^::ffff:/, ''); // the hub address this phone reached
+  const host = ipv4Of((req.socket.localAddress || '').replace(/^::ffff:/, '')); // the hub address this phone reached
   // Unauthenticated sockets get 10 s to say hello, then they're dropped without a word in the log.
   const helloTimer = setTimeout(() => { if (!id) { try { ws.terminate(); } catch {} } }, HELLO_TIMEOUT_MS);
   // Network input must never crash the hub: log, drop this socket, the phone reconnects.
@@ -364,8 +482,10 @@ function onPhone(ws, req) {
       phones.set(id, { ws, host, name: clean(m.name), platform, status: m.status || {}, preview: prev?.preview || DEFAULT_PREVIEW, hidden: false });
       // A phone that dropped off mid-take missed the STOP for a take this hub started: stop it now.
       if (staleTake(m.status)) { send(ws, { t: 'stop', atHubMs: Date.now() }); ui('log', `${clean(m.name)} was still recording an earlier take: stopped it`); }
-      send(ws, streamMsg(id));
+      // After the phone's first clock pings (8 × 120 ms): it sizes the SRT buffer from that measured round trip.
+      setTimeout(() => { if (phones.get(id)?.ws === ws) send(ws, streamMsg(id)); }, 1000);
       send(ws, { t: 'preview', ...phones.get(id).preview });
+      if (inspecting.has(id)) send(ws, { t: 'inspect', on: true }); // the hub's inspector is still open on it
       updatePower();
       return pushPhones();
     }
@@ -381,7 +501,10 @@ function onPhone(ws, req) {
       ui('status', { id, status: m });
       if (m.stream?.state !== was) pollLive(); // the tile switches to video as soon as MediaMTX has the feed
     }
-    if (m.t === 'error') { ui('log', `${p.name}: ${m.message}`); ui('phoneError', { id, message: String(m.message || '') }); }
+    if (m.t === 'error') { // first line only: older phone builds send whole native stack traces
+      const msg = String(m.message || '').split('\n')[0].replace(/\s+at \S+\(r8-map-id.*$/, '').slice(0, 300);
+      ui('log', `${p.name}: ${msg}`); ui('phoneError', { id, message: msg });
+    }
     if (m.t === 'started') ui('log', `${p.name} started (${m.lateMs} ms after target)`);
   });
   ws.on('close', () => {
@@ -392,19 +515,25 @@ function onPhone(ws, req) {
 }
 
 // ---------- OBS ----------
+// Always connected when OBS is reachable ("Add cameras" needs it); the switch only controls record sync.
+let obsBusy = false, obsLastErr = '';
 async function obsConnect() {
-  obsOk = false;
+  if (obsBusy) return;
+  obsBusy = true; obsOk = false;
   try { await obs.disconnect(); } catch {}
-  if (!cfg.obs.enabled) return ui('obs', { ok: false, msg: 'off' });
   try {
     await obs.connect(cfg.obs.url, cfg.obs.password || undefined);
-    obsOk = true;
+    obsOk = true; obsLastErr = '';
     ui('obs', { ok: true, msg: 'connected' });
     obsRefreshSources().catch((e) => flog(`OBS source refresh: ${e.message}`));
   } catch (e) {
-    ui('obs', { ok: false, msg: e.message });
-  }
+    const msg = /auth/i.test(e.message) ? 'wrong password' : 'OBS not found. Is OBS open with its WebSocket server enabled?';
+    if (msg !== obsLastErr) flog(`OBS: ${e.message || e.code || e}`);
+    obsLastErr = msg;
+    ui('obs', { ok: false, msg });
+  } finally { obsBusy = false; }
 }
+setInterval(() => { if (cfg?.obs && !obsOk && obsLastErr !== 'wrong password') obsConnect(); }, 5000); // picks OBS up when it's opened later
 // Sources made by an earlier version (or with an old read password) are rewritten to the current credentials,
 // so they keep playing without the operator re-running "Add to OBS".
 async function obsRefreshSources() {
@@ -417,8 +546,7 @@ async function obsRefreshSources() {
     if (fixed !== url) await obs.call('SetInputSettings', { inputName, inputSettings: { input: fixed }, overlay: true });
   }
 }
-obs.on('ConnectionClosed', () => { obsOk = false; ui('obs', { ok: false, msg: 'disconnected' }); });
-obs.on('ConnectionError', (e) => flog(`OBS connection error: ${e?.message || e}`));
+obs.on('ConnectionClosed', () => { if (obsOk) ui('obs', { ok: false, msg: 'disconnected' }); obsOk = false; }); // failed attempts report via obsConnect
 const obsCall = (req) => obsOk && obs.call(req).catch((e) => ui('log', `OBS ${req}: ${e.message}`));
 
 // ---------- live feed: phones push hardware H.264 over SRT to MediaMTX here; OBS and the tiles read it on localhost ----------
@@ -435,7 +563,8 @@ function streamMsg(id) {
   if (role === 'off') return { t: 'stream', on: false, role };
   const ip = p.host.includes(':') ? `[${p.host}]` : p.host;
   return {
-    t: 'stream', on: true, role, width: preset.w, height: preset.h, fps: preset.fps[cfg.mains], bitrateKbps: preset.kbps, profile: PROFILE,
+    t: 'stream', on: true, role, width: preset.w, height: preset.h, fps: preset.fps[cfg.mains],
+    bitrateKbps: role === 'live' ? preset.kbps[cfg.liveQuality] || preset.kbps.standard : preset.kbps, profile: PROFILE,
     url: `srt://${ip}:${SRT_PORT}?streamid=publish:${pathOf(id)}:tally:${publishPass()}&pkt_size=1316`,
   };
 }
@@ -512,12 +641,14 @@ async function pollLive() {
 
 // Creates or updates one OBS Media Source per phone: a "Tally Cameras" multiview scene plus one full-frame scene each.
 async function obsAddCameras() {
-  if (!obsOk) throw new Error('Connect OBS first (OBS button).');
+  if (!obsOk) await obsConnect();
+  if (!obsOk) throw new Error(obsLastErr || 'OBS is not connected.');
   const cams = [...phones].map(([id, p]) => ({ id, name: p.name })).sort((a, b) => a.name.localeCompare(b.name));
   if (!cams.length) throw new Error('Pair a camera first.');
   const { baseWidth: W, baseHeight: H } = await obs.call('GetVideoSettings');
   const scenes = new Set((await obs.call('GetSceneList')).scenes.map((x) => x.sceneName));
-  const inputs = new Set((await obs.call('GetInputList')).inputs.map((x) => x.inputName));
+  const inputs = new Map((await obs.call('GetInputList')).inputs.map((x) => [x.inputName, x.inputKind]));
+  const livePreset = LIVE[cfg.live] || LIVE[1080];
   const scene = async (sceneName) => { if (!scenes.has(sceneName)) { await obs.call('CreateScene', { sceneName }); scenes.add(sceneName); } };
   const item = async (sceneName, sourceName) => {
     try { return (await obs.call('GetSceneItemId', { sceneName, sourceName })).sceneItemId; }
@@ -527,19 +658,31 @@ async function obsAddCameras() {
     sceneName, sceneItemId,
     sceneItemTransform: { positionX: x, positionY: y, alignment: 5, boundsType: 'OBS_BOUNDS_SCALE_INNER', boundsAlignment: 0, boundsWidth: w, boundsHeight: h },
   });
-  const MAIN = 'Tally Cameras';
+  const MAIN = 'Tally Cameras', OBS_FILTER = 'Tally colour';
   await scene(MAIN);
   const cols = Math.ceil(Math.sqrt(cams.length)), rows = Math.ceil(cams.length / cols);
   for (const [i, c] of cams.entries()) {
     const inputName = `Tally · ${c.name}`;
-    const inputSettings = {
-      is_local_file: false, input: obsReadUrl(c.id), input_format: 'mpegts',
-      hw_decode: true, buffering_mb: 0, reconnect_delay_sec: 1, restart_on_activate: false, close_when_inactive: false,
-      clear_on_media_end: false, ffmpeg_options: 'fflags=nobuffer flags=low_delay',
-    };
+    // Sized like the live feed; the page letterboxes a portrait phone. Kept running when off-screen for instant cuts.
+    const inputSettings = { url: obsViewUrl(c.id), width: livePreset.w, height: livePreset.h, // renders at OBS's own frame rate
+      shutdown: false, restart_when_active: false, reroute_audio: true, css: '' };
+    if (inputs.get(inputName) && inputs.get(inputName) !== 'browser_source') { // an older SRT media source: replace it
+      // Rename first: OBS frees a removed source's name only once its SRT reader lets go, which can take a while.
+      const old = `${inputName} (old ${crypto.randomBytes(2).toString('hex')})`;
+      await obs.call('SetInputName', { inputName, newInputName: old });
+      await obs.call('RemoveInput', { inputName: old }); inputs.delete(inputName);
+    }
     if (inputs.has(inputName)) await obs.call('SetInputSettings', { inputName, inputSettings, overlay: true });
-    else { await obs.call('CreateInput', { sceneName: MAIN, inputName, inputKind: 'ffmpeg_source', inputSettings }); inputs.add(inputName); }
+    else { await obs.call('CreateInput', { sceneName: MAIN, inputName, inputKind: 'browser_source', inputSettings }); inputs.set(inputName, 'browser_source'); }
     await fit(MAIN, await item(MAIN, inputName), (i % cols) * (W / cols), Math.floor(i / cols) * (H / rows), W / cols, H / rows);
+    // OBS's own Color Correction, attached but off: ready for matching cameras where the feeds are mixed.
+    try {
+      const { filters } = await obs.call('GetSourceFilterList', { sourceName: inputName });
+      if (!filters.some((f) => f.filterName === OBS_FILTER)) {
+        await obs.call('CreateSourceFilter', { sourceName: inputName, filterName: OBS_FILTER, filterKind: 'color_filter_v2', filterSettings: {} });
+        await obs.call('SetSourceFilterEnabled', { sourceName: inputName, filterName: OBS_FILTER, filterEnabled: false });
+      }
+    } catch (e) { ui('log', `OBS: could not add the colour filter to ${inputName}: ${e.message}`); }
     const solo = `Tally – ${c.name}`;
     await scene(solo);
     await fit(solo, await item(solo, inputName), 0, 0, W, H);
@@ -573,7 +716,7 @@ function startAll(session = state.nextSession) {
   obsStarted = false;
   obsStartTimer = at(atHubMs, () => {
     obsStartTimer = null;
-    if (!obsOk) return;
+    if (!obsOk || !cfg.obs.enabled) return;
     obsStarted = true;
     obsCall('StartRecord');
     persistTake();
@@ -607,6 +750,20 @@ ipcMain.handle('focus', (_e, id, x, y) => { const p = phones.get(id); p?.ws && s
 ipcMain.handle('lock', (_e, id, on) => {
   phones.forEach((p, pid) => (!id || id === pid) && p.ws && send(p.ws, { t: 'lock', on }));
 });
+// Manual 3A: only the keys given are sent; null = back to auto for that control. The phone clamps to its ranges.
+const MANUAL_KEYS = ['iso', 'shutter', 'wbTemp', 'wbTint', 'focus'];
+ipcMain.handle('manual', (_e, id, m) => {
+  const msg = { t: 'manual' };
+  for (const k of MANUAL_KEYS) if (m && k in m && (m[k] === null || Number.isFinite(m[k]))) msg[k] = m[k];
+  if (Object.keys(msg).length === 1) return;
+  phones.forEach((p, pid) => (!id || id === pid) && p.ws && send(p.ws, msg));
+});
+// The hub's inspector opened/closed on this camera: the phone sends live auto readouts (ISO, shutter) only meanwhile.
+ipcMain.handle('inspect', (_e, id, on) => {
+  if (on) inspecting.add(id); else inspecting.delete(id);
+  const p = phones.get(id);
+  if (p?.ws) send(p.ws, { t: 'inspect', on: !!on });
+});
 // Thumbnail rate per phone, decided by the renderer from what is actually on screen.
 ipcMain.handle('preview', (_e, id, fps, maxWidth) => {
   const p = phones.get(id);
@@ -635,7 +792,8 @@ ipcMain.handle('forget', (_e, id) => {
   const p = phones.get(id);
   const ws = p?.ws;
   if (ws) { send(ws, { t: 'forget' }); setTimeout(() => { try { ws.close(1000, 'forgotten'); } catch {} }, 300); }
-  phones.delete(id); pushPhones(); updatePower();
+  phones.delete(id); inspecting.delete(id); pushPhones(); updatePower();
+  if (cfg.framing?.[id]) { delete cfg.framing[id]; saveCfg(); }
 });
 ipcMain.handle('obs', (_e, o) => { cfg.obs = { ...cfg.obs, ...o }; saveCfg(); return obsConnect(); });
 ipcMain.handle('openFolder', () => { fs.mkdirSync(OUT_ROOT, { recursive: true }); shell.openPath(OUT_ROOT); });
@@ -667,9 +825,17 @@ ipcMain.handle('pairing', async () => {
 ipcMain.handle('firewall', () => firewall());
 ipcMain.handle('firewallFix', () => fixFirewall());
 ipcMain.handle('firewallSettings', () => shell.openExternal(MAC ? 'x-apple.systempreferences:com.apple.preference.security?Firewall' : 'ms-settings:windowsdefender'));
-const liveCfg = () => ({ live: cfg.live, mains: cfg.mains, smooth: cfg.smooth, smoothAndroid: cfg.smoothAndroid });
+const liveKbps = Object.fromEntries(Object.entries(LIVE).map(([k, v]) => [k, v.kbps]));
+const liveCfg = () => ({ live: cfg.live, mains: cfg.mains, smooth: cfg.smooth, smoothAndroid: cfg.smoothAndroid, liveQuality: cfg.liveQuality, liveKbps });
+ipcMain.handle('framing', (_e, id, f) => (typeof id === 'string' && phones.has(id) ? setFraming(id, f || {}) : null));
+ipcMain.handle('portraitGuide', (_e, on) => { cfg.portraitGuide = !!on; saveCfg(); return cfg.portraitGuide; });
 const pushLiveCfg = () => ui('liveCfg', liveCfg());
 ipcMain.handle('live', (_e, preset) => { cfg.live = LIVE[preset] ? String(preset) : 'off'; saveCfg(); pushStreams(); pushLiveCfg(); return cfg.live; });
+ipcMain.handle('liveQuality', (_e, q) => {
+  cfg.liveQuality = QUALITIES.includes(q) ? q : 'standard';
+  saveCfg(); pushStreams(); pushLiveCfg();
+  return cfg.liveQuality;
+});
 ipcMain.handle('mains', (_e, hz) => { cfg.mains = +hz === 50 ? 50 : 60; saveCfg(); pushStreams(); pushLiveCfg(); return cfg.mains; });
 ipcMain.handle('smooth', (_e, o) => {
   if (typeof o.smooth === 'boolean') cfg.smooth = o.smooth;
@@ -682,8 +848,11 @@ ipcMain.handle('obsAddCameras', async () => {
 });
 ipcMain.handle('init', () => {
   setTimeout(() => { pushPhones(); pushState(); pollLive(); }, 0); // a reloaded renderer gets the current phones back
+  for (const id of inspecting) { const p = phones.get(id); if (p?.ws) send(p.ws, { t: 'inspect', on: false }); } // a fresh page has no inspector open
+  inspecting.clear();
   return {
   key: cfg.key, port: PORT, obs: cfg.obs, state, out: OUT_ROOT, ...liveCfg(), srtPort: SRT_PORT, webrtcPort: WEBRTC_PORT,
+  framing: Object.fromEntries(Object.keys(cfg.framing).map((id) => [id, framingOf(id)])), portraitGuide: !!cfg.portraitGuide,
   platform: process.platform, version: VERSION, logPath: logPath(), mediamtx: fs.existsSync(MTX_BIN()),
   };
 });
@@ -761,10 +930,13 @@ app.whenReady().then(() => {
   if (!cfg || typeof cfg !== 'object') cfg = {};
   cfg.key ||= crypto.randomBytes(8).toString('hex'); // stable, so paired phones reconnect after a restart
   cfg.mtxReadPass ||= crypto.randomBytes(24).toString('hex'); // the hub's own local read/API password
+  cfg.obsToken ||= crypto.randomBytes(16).toString('hex'); // lets OBS browser sources open the camera pages
   cfg.obs ||= { enabled: false, url: 'ws://127.0.0.1:4455', password: '' };
   cfg.live ||= 'off';
   cfg.mains ||= 60;
+  if (!QUALITIES.includes(cfg.liveQuality)) cfg.liveQuality = 'standard';
   cfg.smooth ??= true; // iPhones send a light monitor feed so the tiles show real video
+  cfg.framing = cfg.framing && typeof cfg.framing === 'object' ? cfg.framing : {};
   cfg.smoothAndroid ??= false; // on Android the extra camera stream can affect 4K recording on some phones
   cfg.sessions = Array.isArray(cfg.sessions) ? cfg.sessions.slice(-50) : [];
   // Restarted mid-take (crash, or "Quit anyway" while recording)? Carry on with that take, so phones aren't stopped.

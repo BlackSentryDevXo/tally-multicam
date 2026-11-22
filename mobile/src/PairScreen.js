@@ -6,6 +6,20 @@ import { Camera, useObjectOutput } from 'react-native-vision-camera';
 import { C, SP, haptic } from './controls';
 import { candidates, parsePairUrl } from './pairing';
 
+// QR codes: VisionCamera's object output on iOS; it doesn't exist on Android, where its ML Kit scanner does the job.
+// (Platform never changes at runtime, so the hook order stays fixed.)
+const QR_ANDROID = ['qr-code'];
+const useQrOutput = Platform.OS === 'android'
+  ? (onCode) => require('react-native-vision-camera-barcode-scanner').useBarcodeScannerOutput({
+    barcodeFormats: QR_ANDROID,
+    onBarcodeScanned: (codes) => { for (const c of codes) if (onCode(c.rawValue)) return; },
+    onError: () => {},
+  })
+  : (onCode) => useObjectOutput({
+    types: ['qr'],
+    onObjectsScanned: (objs) => { for (const o of objs) if (onCode(o.value)) return; },
+  });
+
 const HOST = /^[\w.-]+(:\d{2,5})?$/;
 const PROBE_MS = 6000;
 const newId = () => Math.random().toString(36).slice(2, 10);
@@ -64,15 +78,11 @@ export function PairScreen({ prev, onPaired }) {
     onPaired({ ...base, host: winner ?? list[0] });
   }
 
-  const qr = useObjectOutput({
-    types: ['qr'],
-    onObjectsScanned(objs) {
-      for (const o of objs) {
-        const p = parsePairUrl(o.value);
-        if (p) return connect(p);
-        if (o.value?.startsWith('cemedia://')) setErr('That QR is from an older hub. Update Tally Hub and scan again.');
-      }
-    },
+  const qr = useQrOutput((value) => {
+    const p = parsePairUrl(value);
+    if (p) { connect(p); return true; }
+    if (value?.startsWith('cemedia://')) setErr('That QR is from an older hub. Update Tally Hub and scan again.');
+    return false;
   });
 
   const submitManual = () => {

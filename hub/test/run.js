@@ -149,6 +149,48 @@ async function main() {
   await streamWhere(G, (m) => m.on === false);
   ok('LIVE on → both phones live; LIVE off → iPhone back to monitor, Android off');
 
+  // Live quality scales the live bitrate (global), and re-pushes streams
+  A.msgs = [];
+  await evaluate(`hub.call('live','1080hfr')`);
+  assert.equal((await streamWhere(A, (m) => m.on && m.role === 'live')).bitrateKbps, 12000);
+  assert.equal(await evaluate(`hub.call('liveQuality','max')`), 'max');
+  assert.equal((await streamWhere(A, (m) => m.on && m.role === 'live')).bitrateKbps, 30000);
+  assert.equal(await evaluate(`hub.call('liveQuality','bogus')`), 'standard');
+  assert.equal((await streamWhere(A, (m) => m.on && m.role === 'live')).bitrateKbps, 12000);
+  await evaluate(`hub.call('live','off')`);
+  await streamWhere(A, (m) => m.role === 'monitor');
+  ok('live quality: 1080p60 standard 12 Mb/s, max 30 Mb/s, unknown → standard');
+
+  // Inspector controls reach the phone: manual 3A (only the keys given, null = auto) and inspect on/off
+  A.msgs = [];
+  await evaluate(`hub.call('manual','camA',{ iso: 400, shutter: 0.01, focus: null, junk: 1, wbTemp: 'hot' })`);
+  assert.deepEqual(await A.next('manual'), { t: 'manual', iso: 400, shutter: 0.01, focus: null });
+  await evaluate(`hub.call('inspect','camA',true)`);
+  assert.deepEqual(await A.next('inspect'), { t: 'inspect', on: true });
+  await evaluate(`hub.call('inspect','camA',false)`);
+  assert.deepEqual(await A.next('inspect'), { t: 'inspect', on: false });
+  await G.none('manual', 300);
+  ok('manual {iso, shutter, focus:null} and inspect {on} reach only that phone; unknown/bad keys dropped');
+
+  // Framing: clamped inside the frame, persisted, served to the OBS page (JSON and a live SSE stream), token-checked
+  const obsToken = JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8')).obsToken;
+  const sse = [];
+  const sseReq = http.get({ host: '127.0.0.1', port: PORT, path: `/obs/cam-camA/framing?k=${obsToken}`, headers: { accept: 'text/event-stream' } },
+    (r) => r.on('data', (c) => sse.push(String(c))));
+  sseReq.on('error', () => {});
+  await sleep(300);
+  const f = await evaluate(`hub.call('framing','camA',{ zoom: 2, x: 0.95, y: 0.5, portraitX: 0 })`);
+  assert.deepEqual(f, { zoom: 2, x: 0.75, y: 0.5, portraitX: (9 / 16) / (16 / 9) / 2 });
+  let [fst, fbody] = await req('GET', `/obs/cam-camA/framing?k=${obsToken}`);
+  assert.equal(fst, 200); assert.deepEqual(JSON.parse(fbody), f);
+  [fst] = await req('GET', '/obs/cam-camA/framing?k=wrong'); assert.equal(fst, 404);
+  await waitFor(() => sse.join('').includes('"zoom":2'), 3000, 'framing pushed over SSE');
+  sseReq.destroy();
+  await waitFor(() => JSON.parse(fs.readFileSync(path.join(userData, 'config.json'), 'utf8')).framing?.camA?.zoom === 2, 3000, 'framing saved');
+  assert.equal(await evaluate(`hub.call('framing','nobody',{ zoom: 2 })`), null);
+  await evaluate(`hub.call('framing','camA',{ zoom: 1, x: 0.5, y: 0.5 })`);
+  ok('framing: clamped, saved, served as JSON + SSE to the OBS page, wrong token 404');
+
   // Reconnect stop rules
   const S = new Phone('camS', 'Standalone');
   await S.open({ recording: true, session: '' }); await S.none('stop'); S.end();
