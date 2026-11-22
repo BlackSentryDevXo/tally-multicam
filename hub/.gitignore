@@ -1,0 +1,5 @@
+node_modules/
+dist/
+bin/*/
+bin/mediamtx
+bin/mediamtx.exe

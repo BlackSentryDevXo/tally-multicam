@@ -1,0 +1,66 @@
+# MediaMTX config for Tally Hub. Phones publish hardware H.264 over SRT; OBS reads SRT and the hub's own
+# tiles read WebRTC (WHEP) through the hub's main process, both only from this computer.
+# Tally Hub starts MediaMTX with the two passwords below set from its own config (never the values here):
+#   MTX_AUTHINTERNALUSERS_0_PASS  phones' publish password (derived from the pairing key)
+#   MTX_AUTHINTERNALUSERS_1_PASS  the hub's local read/API password (random, stored in the hub's config.json)
+# and overrides the ports with MTX_SRTADDRESS / MTX_APIADDRESS / MTX_WEBRTCADDRESS / MTX_WEBRTCLOCALUDPADDRESS.
+# Nothing is readable without a password: a web page open on this computer can't watch the cameras or
+# reconfigure the server, even via DNS rebinding.
+logLevel: warn
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 1024
+
+authMethod: internal
+authInternalUsers:
+  # Phones: publish only, with the password from the hub (any network address).
+  - user: tally
+    pass: change-me
+    ips: []
+    permissions:
+      - action: publish
+  # Tally Hub itself and the OBS sources it creates: read streams and use the local API, this computer only.
+  - user: hubread
+    pass: change-me-too
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: read
+      - action: api
+
+api: true
+apiAddress: 127.0.0.1:9997
+# Browsers never get CORS access: only the hub's main process (which sends no Origin) talks to these.
+apiAllowOrigins: ["http://tally-hub.invalid"]
+metrics: false
+pprof: false
+playback: false
+rtsp: false
+rtmp: false
+hls: false
+moq: false
+
+# WebRTC: the hub's tiles play each feed through WHEP. Localhost only; no STUN/TURN, no HTTPS needed.
+webrtc: true
+webrtcAddress: 127.0.0.1:8889
+webrtcEncryption: false
+webrtcAllowOrigins: ["http://tally-hub.invalid"]
+webrtcLocalUDPAddress: 127.0.0.1:8189
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: false
+webrtcIPsFromInterfacesList: []
+webrtcAdditionalHosts: ["127.0.0.1"]
+webrtcICEServers2: []
+webrtcHandshakeTimeout: 10s
+webrtcTrackGatherTimeout: 2s
+
+srt: true
+srtAddress: :8890
+# Wi-Fi retransmission window. Raise to 200ms on a busy network; lower to 80ms on a clean 5 GHz one.
+srtMinLatency: 120ms
+
+pathDefaults:
+  overridePublisher: true # a phone that reconnects replaces its own stale stream
+
+paths:
+  all_others:
