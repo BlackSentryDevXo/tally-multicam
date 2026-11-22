@@ -558,7 +558,10 @@ async function fixFirewall() {
     fwStuck = `macOS won't keep the rule because ${r.adhoc.join(' and ')} ${r.adhoc.length > 1 ? 'are' : 'is'} ad-hoc signed. Tally Hub must be signed: see README → Packaging.`;
     await checkFirewall();
     toast(fwStuck, 'e');
-  } else if (!r.cancelled) toast('Could not change the firewall. Allow Tally Hub in System Settings → Network → Firewall.', 'w');
+  } else if (!r.cancelled) {
+    const still = (r.blocked || []).map((p) => p.split('/').pop()).join(' and ') || 'Tally Hub';
+    toast(`Could not allow ${still}. Add it in System Settings → Network → Firewall → Options.`, 'w');
+  }
 }
 $('#fwFix').onclick = $('#pairFwFix').onclick = fixFirewall;
 

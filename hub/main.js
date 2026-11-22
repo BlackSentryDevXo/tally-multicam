@@ -173,18 +173,42 @@ async function firewall() {
   if (!/State = [12]/.test(state)) return { ok: true, app: bundle };
   if (/State = 2/.test(state) || /block all state set to enabled/i.test(await run('--getblockall'))) return { ok: false, blockAll: true, app: bundle };
   const lines = (await run('--listapps')).split('\n');
-  const allowed = (p) => {
-    const i = lines.findIndex((l) => l.replace(/\s+$/, '').endsWith(` : ${p}`));
-    return i >= 0 && /Allow incoming/i.test(lines[i + 1] || '');
+  // Allowed entries as listed: path → rule. macOS matches signed code by its signature (identifier + team), not
+  // its path, so a moved or updated binary with the same signature is covered by the old entry and `--add` won't
+  // list it again. Compare signatures for signed targets; fall back to the path for ad-hoc/unsigned code.
+  const allowedPaths = [];
+  lines.forEach((l, i) => {
+    const m = l.match(/^\s*\d+\s*:\s*(.+?)\s*$/);
+    if (m && /Allow incoming/i.test(lines[i + 1] || '')) allowedPaths.push(m[1]);
+  });
+  const sig = async (p) => {
+    const info = await codesignInfo(p);
+    const id = info.match(/^Identifier=(.+)$/m)?.[1];
+    const team = info.match(/^TeamIdentifier=(.+)$/m)?.[1];
+    return id && team && team !== 'not set' ? `${id}|${team}` : null;
   };
-  const blocked = fwTargets().filter((p) => !allowed(p));
+  const allowedSigs = new Set((await Promise.all(allowedPaths.filter((p) => fs.existsSync(p)).map(sig))).filter(Boolean));
+  const blocked = [];
+  for (const p of fwTargets()) {
+    if (allowedPaths.includes(p)) continue;
+    const s = await sig(p);
+    if (s && allowedSigs.has(s)) continue;
+    // The old entry may point at a path an update removed (macOS keeps its signature internally, we can't read
+    // it). A signed binary with the same name inside this same app bundle is what macOS matched it to.
+    if (s && allowedPaths.some((a) => !fs.existsSync(a) && a.startsWith(`${bundle}/`) && path.basename(a) === path.basename(p))) continue;
+    blocked.push(p);
+  }
   return { ok: !blocked.length, blocked, app: bundle };
 }
 // Adds and unblocks the app and MediaMTX via the standard macOS administrator prompt; never sudo silently.
-function fixFirewall() {
+async function fixFirewall() {
   if (!MAC) return firewall();
+  // Only touch what is actually blocked. socketfilterfw exits non-zero for "already added", so each step runs on
+  // its own (';' and '|| true', never '&&'); success is judged by re-reading --listapps afterwards, not exit codes.
+  const before = await firewall();
+  const targets = before.blocked?.length ? before.blocked : fwTargets();
   const sh = (v) => `'${v.replace(/'/g, `'\\''`)}'`;
-  const cmd = fwTargets().map((t) => `${FW} --add ${sh(t)} && ${FW} --unblockapp ${sh(t)}`).join(' && ');
+  const cmd = targets.map((t) => `${FW} --add ${sh(t)} || true; ${FW} --unblockapp ${sh(t)} || true`).join('; ');
   const script = `do shell script "${cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}" with administrator privileges`;
   return new Promise((res) => execFile('osascript', ['-e', script], async (err) => {
     const after = await firewall();
